@@ -33,6 +33,7 @@ public:
     : ShenandoahHeuristics(generation) {}
 
   virtual bool should_start_gc();
+  virtual size_t start_gc_threshold();
 
   virtual bool should_unload_classes();
 

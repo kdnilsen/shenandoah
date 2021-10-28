@@ -30,19 +30,46 @@
 #include "runtime/atomic.hpp"
 
 inline void ShenandoahPacer::report_mark(size_t words) {
+#define KELVIN_VERBOSE
+#ifdef KELVIN_VERBOSE
+  // This is called many times, apparently to accumulate all of the
+  // live data found during concurrent marking.  I'm inclined to
+  // disable this service because it may be too much coordination
+  // overhead between background GC threads and the pacer.
+  printf("report_mark(" SIZE_FORMAT ") is adding words to budget\n", words);
+#endif
   report_internal(words);
   report_progress_internal(words);
 }
 
 inline void ShenandoahPacer::report_evac(size_t words) {
+#ifdef KELVIN_VERBOSE
+  // This is apparently called every time we evacuate a region, with
+  // argument representing the number of used words within in the
+  // region.  This indicates some amount of progress by the evacuator.
+  printf("report_evac(" SIZE_FORMAT ") is adding words to budget\n", words);
+#endif
   report_internal(words);
 }
 
 inline void ShenandoahPacer::report_updaterefs(size_t words) {
+#ifdef KELVIN_VERBOSE
+  // This is apparently called every time we've updated references within a heap region.  The argument is the number
+  // of words between bottom() and update_watermark.  Many invocations have words == 0 (regions that came into existence
+  // following start of evacuation will not hold pointers to from-space).
+  printf("report_updaterefs(" SIZE_FORMAT ") is adding words to budget\n", words);
+#endif
   report_internal(words);
 }
 
 inline void ShenandoahPacer::report_alloc(size_t words) {
+#ifdef KELVIN_VERBOSE
+  // This represents an accumulation of allocations reported by ShenandoahControlThread::pacing_notify_alloc(),
+  // Each time the ShenandoahControlThread::run_service() log, we submit this report to the pacer.  These reports
+  // are the result of calling notify_mutator_alloc_words.  This lets the pacer know how many mutator allocations
+  // have taken place while we are working on gc.
+  printf("report_alloc(" SIZE_FORMAT ") is adding words to budget (seems bass ackwards to increment for budget for allocs seen)\n", words);
+#endif
   report_internal(words);
 }
 

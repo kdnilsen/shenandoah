@@ -1134,6 +1134,11 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
       result = allocate_memory_under_lock(req, in_new_region, is_promotion);
     }
 
+    // KELVIN HAS WORK TO DO HERE.  IF RESULT COMES BACK NULL, LET'S
+    // TRY A INVOCATION OF PACER()->PACE_UNTIL_NEW_GC_CYCLE() instead
+    // of immediately degenerating.  I think
+    // control_thread()->handle_alloc_failure() is what causes deneration.
+
     // Allocation failed, block until control thread reacted, then retry allocation.
     //
     // It might happen that one of the threads requesting allocation would unblock

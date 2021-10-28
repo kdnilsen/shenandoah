@@ -275,11 +275,11 @@ void ShenandoahOldHeuristics::prepare_for_old_collections() {
                byte_size_in_proper_unit(collectable_garbage), proper_unit_for_byte_size(collectable_garbage), _last_old_collection_candidate,
                byte_size_in_proper_unit(immediate_garbage), proper_unit_for_byte_size(immediate_garbage), immediate_regions);
 
-  if (unprocessed_old_collection_candidates() == 0) {
+   if (unprocessed_old_collection_candidates() == 0) {
     _old_generation->transition_to(ShenandoahOldGeneration::IDLE);
-  } else {
+   } else {
     _old_generation->transition_to(ShenandoahOldGeneration::WAITING);
-  }
+   }
 }
 
 uint ShenandoahOldHeuristics::last_old_collection_candidate_index() {
@@ -287,6 +287,7 @@ uint ShenandoahOldHeuristics::last_old_collection_candidate_index() {
 }
 
 uint ShenandoahOldHeuristics::unprocessed_old_collection_candidates() {
+  assert(_generation->generation_mode() == OLD, "This service only available for old-gc heuristics");
   return _last_old_collection_candidate - _next_old_collection_candidate;
 }
 
@@ -301,13 +302,13 @@ ShenandoahHeapRegion* ShenandoahOldHeuristics::next_old_collection_candidate() {
         _first_pinned_candidate = _next_old_collection_candidate;
       }
     }
-
     _next_old_collection_candidate++;
   }
   return nullptr;
 }
 
 void ShenandoahOldHeuristics::consume_old_collection_candidate() {
+  assert(_generation->generation_mode() == OLD, "This service only available for old-gc heuristics");
   _next_old_collection_candidate++;
 }
 
@@ -341,6 +342,10 @@ void ShenandoahOldHeuristics::record_cycle_start() {
 
 void ShenandoahOldHeuristics::record_cycle_end() {
   _trigger_heuristic->record_cycle_end();
+}
+
+size_t ShenandoahOldHeuristics::start_gc_threshold() {
+  return _trigger_heuristic->start_gc_threshold();
 }
 
 bool ShenandoahOldHeuristics::should_start_gc() {

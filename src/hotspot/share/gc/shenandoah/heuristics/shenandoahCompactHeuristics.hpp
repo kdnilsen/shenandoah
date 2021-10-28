@@ -31,6 +31,7 @@ class ShenandoahCompactHeuristics : public ShenandoahHeuristics {
 public:
   ShenandoahCompactHeuristics(ShenandoahGeneration* generation);
 
+  virtual size_t start_gc_threshold();
   virtual bool should_start_gc();
 
   virtual void choose_collection_set_from_regiondata(ShenandoahCollectionSet* cset,

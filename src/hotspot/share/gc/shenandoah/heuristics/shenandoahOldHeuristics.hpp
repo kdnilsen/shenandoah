@@ -68,6 +68,7 @@ private:
   // This index points to the first candidate in line to be added to the mixed
   // collection set. It is updated as regions are added to the collection set.
   uint _next_old_collection_candidate;
+  size_t _old_collection_candidates_used;
 
   // This is the last index in the array of old regions which were active at
   // the end of old final mark.
@@ -101,8 +102,11 @@ public:
   // How many old-collection candidates have not yet been processed?
   uint unprocessed_old_collection_candidates();
 
-  // How many old or hidden collection candidates have not yet been processed?
+   // How many old or hidden collection candidates have not yet been processed?
   uint last_old_collection_candidate_index();
+
+  // How much memory is "used" within the old collection candidates?
+  size_t old_collection_candidates_used();
 
   // Return the next old-collection candidate in order of decreasing amounts of garbage.  (We process most-garbage regions
   // first.)  This does not consume the candidate.  If the candidate is selected for inclusion in a collection set, then
@@ -134,6 +138,8 @@ public:
   virtual void record_cycle_start() override;
 
   virtual void record_cycle_end() override;
+
+  virtual size_t start_gc_threshold() override;
 
   virtual bool should_start_gc() override;
 

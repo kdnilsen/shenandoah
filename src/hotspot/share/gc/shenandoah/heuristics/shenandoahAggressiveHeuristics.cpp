@@ -60,6 +60,11 @@ void ShenandoahAggressiveHeuristics::choose_collection_set_from_regiondata(Shena
   }
 }
 
+size_t ShenandoahAggressiveHeuristics::start_gc_threshold() {
+  // The time to start GC is now!
+  return _generation->available();
+}
+
 bool ShenandoahAggressiveHeuristics::should_start_gc() {
   log_info(gc)("Trigger: Start next cycle immediately");
   return true;

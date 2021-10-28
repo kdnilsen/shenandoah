@@ -40,6 +40,15 @@ ShenandoahStaticHeuristics::ShenandoahStaticHeuristics(ShenandoahGeneration* gen
 
 ShenandoahStaticHeuristics::~ShenandoahStaticHeuristics() {}
 
+size_t ShenandoahStaticHeuristics::start_gc_threshold() {
+
+  size_t min_threshold = capacity / 100 * ShenandoahMinFreeThreshold;
+
+  size_t generic_threshold = ShenandoahHeuristics::start_gc_threshold();
+
+  return MAX2(min_threshold, generic_threshold);
+}
+
 bool ShenandoahStaticHeuristics::should_start_gc() {
   size_t max_capacity = _generation->max_capacity();
   size_t capacity = _generation->soft_max_capacity();

@@ -25,6 +25,7 @@
 #ifndef SHARE_GC_SHENANDOAH_HEURISTICS_SHENANDOAHAGGRESSIVEHEURISTICS_HPP
 #define SHARE_GC_SHENANDOAH_HEURISTICS_SHENANDOAHAGGRESSIVEHEURISTICS_HPP
 
+#include "gc/shenandoah/shenandoahGeneration.hpp"
 #include "gc/shenandoah/heuristics/shenandoahHeuristics.hpp"
 
 class ShenandoahAggressiveHeuristics : public ShenandoahHeuristics {
@@ -36,6 +37,7 @@ public:
                                                      size_t free);
 
   virtual bool should_start_gc();
+  virtual size_t start_gc_threshold();
 
   virtual bool should_unload_classes();
 

@@ -45,6 +45,32 @@ ShenandoahCompactHeuristics::ShenandoahCompactHeuristics(ShenandoahGeneration* g
   SHENANDOAH_ERGO_OVERRIDE_DEFAULT(ShenandoahGarbageThreshold,     10);
 }
 
+size_t ShenandoahCompactHeuristics::start_gc_threshold() {
+  size_t available = _generation->available();
+  size_t capacity = _generation->soft_max_capacity();
+  size_t dominant_threshold;
+
+  // Compute min_threshold.
+  size_t min_threshold = dominant_threshold = capacity / 100 * ShenandoahMinFreeThreshold;
+
+  // Compute allocation_threshold.
+  size_t allocation_threshold;
+  size_t threshold_bytes_allocated = capacity / 100 * ShenandoahAllocationThreshold;
+  size_t bytes_allocated = _generation->bytes_allocated_since_gc_start();
+  if (bytes_allocated > threshold_bytes_allocated) {
+    allocation_threshold = available;
+  } else {
+    allocation_threshold = available - (threshold_bytes_allocated - bytes_allocated);
+  }
+  dominant_threshold = MAX2(allocation_threshold, dominant_threshold);
+
+  // Compute generic_threshold.
+  size_t generic_threshold = ShenandoahHeuristics::start_gc_threshold();
+  dominant_threshold = MAX2(generic_threshold, dominant_threshold);
+
+  return dominant_threshold;
+}
+
 bool ShenandoahCompactHeuristics::should_start_gc() {
   size_t max_capacity = _generation->max_capacity();
   size_t capacity = _generation->soft_max_capacity();

@@ -31,6 +31,10 @@
 #include "logging/log.hpp"
 #include "logging/logTag.hpp"
 
+size_t ShenandoahPassiveHeuristics::start_gc_threshold() {
+  return 0;
+}
+
 bool ShenandoahPassiveHeuristics::should_start_gc() {
   // Never do concurrent GCs.
   return false;

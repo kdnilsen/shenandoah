@@ -67,6 +67,7 @@ public:
   void record_success_full();
 
   virtual bool should_start_gc();
+  virtual size_t start_gc_threshold();
 
   virtual const char* name()     { return "Adaptive"; }
   virtual bool is_diagnostic()   { return false; }

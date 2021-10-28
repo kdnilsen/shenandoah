@@ -308,6 +308,63 @@ static double saturate(double value, double min, double max) {
   return MAX2(MIN2(value, max), min);
 }
 
+size_t ShenandoahAdaptiveHeuristics::start_gc_threshold() {
+
+  size_t max_capacity = _generation->max_capacity();
+  size_t capacity = _generation->soft_max_capacity();
+  size_t available = _generation->available();
+  size_t allocated = _generation->bytes_allocated_since_gc_start();
+
+  log_debug(gc)("ShenandoahAdaptiveHeuristics::start_gc_threshold (%s)? available: " SIZE_FORMAT
+                ", soft_max_capacity: " SIZE_FORMAT ", max_capacity: " SIZE_FORMAT ", allocated: " SIZE_FORMAT,
+                _generation->name(), available, capacity, max_capacity, allocated);
+
+  // Track allocation rate even if we decide to start a cycle for other reasons.
+  double instantaneous_rate = _allocation_rate.sample(allocated);
+
+  // Trigger GC when available falls below any of min_threshold, learn_threshold, pacing_threshold,
+  // spike_threshold, or generic_threshold.  This function returns the max of all the specific thresholds.
+  size_t dominant_threshold;
+
+  // Compute min_threshold.
+  size_t min_threshold = dominant_threshold = capacity / 100 * ShenandoahMinFreeThreshold;
+
+  // Compute learn_threshold
+  size_t learn_threshold = 0;
+  const size_t max_learn = ShenandoahLearningSteps;
+  if (_gc_times_learned < max_learn) { // Trigger right now.
+    learn_threshold = available;
+    dominant_threshold = MAX2(learn_threshold, dominant_threshold);
+  }
+
+  // Compute pacing_threshold.
+  size_t spike_headroom = capacity / 100 * ShenandoahAllocSpikeFactor;
+  size_t penalties      = capacity / 100 * _gc_time_penalties;
+  double avg_cycle_time = _gc_time_history->davg() + (_margin_of_error_sd * _gc_time_history->dsd());
+  double avg_alloc_rate = _allocation_rate.upper_bound(_margin_of_error_sd);
+  size_t pacing_threshold = avg_cycle_time * avg_alloc_rate + spike_headroom + penalties;
+  dominant_threshold = MAX2(pacing_threshold, dominant_threshold);
+
+  // Compute spiking_threshold.
+  bool is_spiking = _allocation_rate.is_spiking(instantaneous_rate, _spike_threshold_sd);
+  size_t spiking_threshold = 0;
+  if (is_spiking) {
+    spiking_threshold = avg_cycle_time * instantaneous_rate + spike_headroom + penalties;
+    dominant_threshold = MAX2(spiking_threshold, dominant_threshold);
+  }
+
+  // Compute generic_threshold.
+  size_t generic_threshold = ShenandoahHeuristics::start_gc_threshold();
+  dominant_threshold = MAX2(generic_threshold, dominant_threshold);
+
+  log_debug(gc)("ShenandoahAdaptiveHeuristics::start_gc_threshold (%s) returning " SIZE_FORMAT
+                "=MAX(" SIZE_FORMAT ", " SIZE_FORMAT ", " SIZE_FORMAT ", " SIZE_FORMAT ", " SIZE_FORMAT ")",
+                _generation->name(), dominant_threshold, min_threshold, learn_threshold,
+                pacing_threshold, spiking_threshold, generic_threshold);
+
+  return dominant_threshold;
+}
+
 bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   size_t max_capacity = _generation->max_capacity();
   size_t capacity = _generation->soft_max_capacity();
@@ -318,6 +375,12 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
                 ", max_capacity: " SIZE_FORMAT ", allocated: " SIZE_FORMAT,
                 _generation->name(), available, capacity, max_capacity, allocated);
 
+#define KELVIN_VERBOSE
+#ifdef KELVIN_VERBOSE
+  log_info(gc)("should_start_gc (%s)? used: " SIZE_FORMAT ", available: " SIZE_FORMAT
+               "\n                 soft_max_capacity: " SIZE_FORMAT ", max_capacity: " SIZE_FORMAT ", allocated: " SIZE_FORMAT,
+         _generation->name(), _generation->used(), available, capacity, max_capacity, allocated);
+#endif
   // Make sure the code below treats available without the soft tail.
   size_t soft_tail = max_capacity - capacity;
   available = (available > soft_tail) ? (available - soft_tail) : 0;
@@ -354,11 +417,29 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   allocation_headroom -= MIN2(allocation_headroom, penalties);
   allocation_headroom -= MIN2(allocation_headroom, spike_headroom);
 
+#ifdef KELVIN_VERBOSE
+  // Seems to me that ShenandoahAllocSpikeFactor and _gc_time_penalties might be absolute quantities rather than
+  // percentages of capacity.
+
+  log_info(gc)("  spike_headroom: " SIZE_FORMAT " (ShenandoahAllocSpikeFactor: " SIZE_FORMAT "), gc penalties: "
+               SIZE_FORMAT " (_gc_time_penalties: " SIZE_FORMAT ")",
+               spike_headroom, ShenandoahAllocSpikeFactor, penalties, _gc_time_penalties);
+#endif
+
+
   // Track allocation rate even if we decide to start a cycle for other reasons.
   double rate = _allocation_rate.sample(allocated);
   _last_trigger = OTHER;
 
   size_t min_threshold = min_free_threshold();
+
+#ifdef KELVIN_VERBOSE
+  // ShenandoahMinFreeThreshold is a percentage:  35 means 35%.  If available is ever below this amount of memory, then
+  // we should immediately start GC.  However, we do not endeavor to assure that we have this much working buffer available
+  // within the generation as of when we end the GC effort.
+  log_info(gc)("  available adjusted to: " SIZE_FORMAT ", min_threshold: " SIZE_FORMAT ", ShenandoahMinFreeThreshold: " SIZE_FORMAT,
+         available, min_threshold, ShenandoahMinFreeThreshold);
+#endif
 
   if (allocation_headroom < min_threshold) {
     log_info(gc)("Trigger (%s): Free (" SIZE_FORMAT "%s) is below minimum threshold (" SIZE_FORMAT "%s)",
@@ -367,6 +448,11 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
                  byte_size_in_proper_unit(min_threshold), proper_unit_for_byte_size(min_threshold));
     return true;
   }
+
+#ifdef KELVIN_VERBOSE
+  log_info(gc)("  _gc_times_learned: " SIZE_FORMAT ", ShenandoahLearningSteps: " SIZE_FORMAT,
+               _gc_times_learned, ShenandoahLearningSteps);
+#endif
 
   // Check if we need to learn a bit about the application
   const size_t max_learn = ShenandoahLearningSteps;
@@ -410,7 +496,6 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   //    in operation mode.  We want some way to decide that the average rate has changed.  Make average allocation rate
   //    computations an independent effort.
 
-
   // TODO: Account for inherent delays in responding to GC triggers
   //  1. It has been observed that delays of 200 ms or greater are common between the moment we return true from should_start_gc()
   //     and the moment at which we begin execution of the concurrent reset phase.  Add this time into the calculation of
@@ -421,7 +506,6 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   //     the calculation of avg_cycle_time below.
 
   double avg_cycle_time = _gc_time_history->davg() + (_margin_of_error_sd * _gc_time_history->dsd());
-
   size_t last_live_memory = get_last_live_memory();
   size_t penultimate_live_memory = get_penultimate_live_memory();
   double original_cycle_time = avg_cycle_time;
@@ -443,6 +527,12 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   double avg_alloc_rate = _allocation_rate.upper_bound(_margin_of_error_sd);
   log_debug(gc)("%s: average GC time: %.2f ms, allocation rate: %.0f %s/s",
     _generation->name(), avg_cycle_time * 1000, byte_size_in_proper_unit(avg_alloc_rate), proper_unit_for_byte_size(avg_alloc_rate));
+
+#ifdef KELVIN_VERBOSE
+  log_info(gc)("  avg_cycle_time: %.2f ms, avg_alloc_rate: %.0f %sB/s, time to deplete headroom: %.3fs",
+               avg_cycle_time * 1000, byte_size_in_proper_unit(avg_alloc_rate), proper_unit_for_byte_size(avg_alloc_rate),
+               allocation_headroom / avg_alloc_rate);
+#endif
 
   if (avg_cycle_time > allocation_headroom / avg_alloc_rate) {
     if (avg_cycle_time > original_cycle_time) {
@@ -467,6 +557,10 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   }
 
   bool is_spiking = _allocation_rate.is_spiking(rate, _spike_threshold_sd);
+#ifdef KELVIN_VERBOSE
+  log_info(gc)("  is_spiking: %s (rate: %.3f %sB/s, _spike_threshold_sd: %.6f)",
+               is_spiking? "true": "false", byte_size_in_proper_unit(rate), proper_unit_for_byte_size(rate), _spike_threshold_sd);
+#endif
   if (is_spiking && avg_cycle_time > allocation_headroom / rate) {
     log_info(gc)("Trigger (%s): Average GC time (%.2f ms) is above the time for instantaneous allocation rate (%.0f %sB/s) to deplete free headroom (" SIZE_FORMAT "%s) (spike threshold = %.2f)",
                  _generation->name(), avg_cycle_time * 1000,

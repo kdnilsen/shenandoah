@@ -124,14 +124,17 @@
           "generational mode) below which most heuristics trigger "         \
           "collection independent of other triggers. Provides a safety "    \
           "margin for many heuristics. In percents of (soft) max heap "     \
-          "size.")                                                          \
+          "size.  Scheduling heuristics do not endeavor to assure that "    \
+          "GC completes with this amount of available memory in reserve.")  \
           range(0,100)                                                      \
                                                                             \
   product(uintx, ShenandoahOldMinFreeThreshold, 5, EXPERIMENTAL,            \
           "Percentage of free old generation heap memory below which most " \
           "heuristics trigger collection independent of other triggers. "   \
           "Provides a safety margin for many heuristics. In percents of "   \
-          "(soft) max heap size.")                                          \
+          "(soft) max heap size.  Scheduling heuristics do not endeavor "   \
+          "to assure that GC completes with this amount of available "      \
+          "memory in reserve.")                                             \
           range(0,100)                                                      \
                                                                             \
   product(uintx, ShenandoahAllocationThreshold, 0, EXPERIMENTAL,            \
@@ -384,9 +387,9 @@
           "Pace application allocations to give GC chance to start "        \
           "and complete before allocation failure is reached.")             \
                                                                             \
-  product(uintx, ShenandoahPacingMaxDelay, 10, EXPERIMENTAL,                \
+  product(uintx, ShenandoahPacingMaxDelay, 3, EXPERIMENTAL,                 \
           "Max delay for pacing application allocations. Larger values "    \
-          "provide more resilience against out of memory, at expense at "   \
+          "provide more resilience against out of memory, at expense of "   \
           "hiding the GC latencies in the allocation path. Time is in "     \
           "milliseconds. Setting it to arbitrarily large value makes "      \
           "GC effectively stall the threads indefinitely instead of going " \
@@ -413,6 +416,12 @@
           "risk GC cycles finish with less memory than were available at "  \
           "the beginning of it.")                                           \
           range(1.0, 100.0)                                                 \
+                                                                            \
+  product(uintx, ShenandoahPacingOldRatio, 32, EXPERIMENTAL,                \
+          "When pacing is enabled for generational mode, arrange that "     \
+          "old-gen collection finishes with no more than this number "      \
+          "of interruptions by urgent young-gen collections.")              \
+          range(1, 100)                                                     \
                                                                             \
   product(uintx, ShenandoahCriticalFreeThreshold, 1, EXPERIMENTAL,          \
           "How much of the heap needs to be free after recovery cycles, "   \

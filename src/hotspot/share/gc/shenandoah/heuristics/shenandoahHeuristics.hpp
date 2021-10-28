@@ -77,7 +77,7 @@ protected:
   // if (_generation->generation_mode() == OLD) _region_data represents
   //  the results of most recently completed old-gen marking pass
   // if (_generation->generation_mode() == YOUNG) _region_data represents
-  //  the resulits of most recently completed young-gen marking pass
+  //  the results of most recently completed young-gen marking pass
   //
   // Note that there is some redundancy represented in _region_data because
   // each instance is an array large enough to hold all regions.  However,
@@ -86,6 +86,8 @@ protected:
   // YOUNG or OLD data.  Consider this redundancy of data structure to
   // have negligible cost unless proven otherwise.
   RegionData* _region_data;
+
+  uint _live_bytes;
 
   uint _degenerated_cycles_in_a_row;
   uint _successful_cycles_in_a_row;
@@ -143,6 +145,9 @@ public:
 
   virtual bool should_start_gc();
 
+  // Based on "most current information", what is the threshold level of available below which gc must be triggered?
+  virtual size_t start_gc_threshold();
+
   virtual bool should_degenerate_cycle();
 
   virtual void record_success_concurrent(bool abbreviated);
@@ -173,6 +178,10 @@ public:
   void save_last_live_memory(size_t live_memory);
   size_t get_last_live_memory();
   size_t get_penultimate_live_memory();
+
+  void set_live_bytes(size_t value);
+  // May only be valid for young-gen heuristics.
+  size_t get_live_bytes();
 };
 
 #endif // SHARE_GC_SHENANDOAH_HEURISTICS_SHENANDOAHHEURISTICS_HPP

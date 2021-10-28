@@ -115,6 +115,7 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
 
   size_t cand_idx = 0;
 
+  size_t total_live = 0;
   size_t total_garbage = 0;
 
   size_t immediate_garbage = 0;
@@ -132,6 +133,7 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
 
     size_t garbage = region->garbage();
     total_garbage += garbage;
+    total_live += region->get_live_data_bytes();
     if (region->is_empty()) {
       free_regions++;
       free += ShenandoahHeapRegion::region_size_bytes();
@@ -180,6 +182,7 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
       live_memory += region->get_live_data_bytes();
     }
   }
+  set_live_bytes(total_live);
 
   save_last_live_memory(live_memory);
 
@@ -243,6 +246,11 @@ void ShenandoahHeuristics::record_cycle_start() {
 
 void ShenandoahHeuristics::record_cycle_end() {
   _last_cycle_end = os::elapsedTime();
+}
+
+size_t ShenandoahHeuristics::start_gc_threshold() {
+  // Since we can't predict metaspace_oom() or passage of guaranteed interval time, we allow full consumption of available.
+  return 0;
 }
 
 bool ShenandoahHeuristics::should_start_gc() {
