@@ -81,7 +81,7 @@ void ShenandoahPacer::setup_for_mark() {
 
   if (_is_generational)
   {
-    size_t live_bytes = Atomic::load(&_most_recent_live_bytes);
+    size_t live_bytes = Atomic::load(&_most_recent_young_live_bytes);
     size_t young_used = _heap->young_generation()->used();
     if (live_bytes == 0) {
       // No history yet.  Assume everything needs to be marked. During initialization, a high percentage of objects will
@@ -102,16 +102,16 @@ void ShenandoahPacer::setup_for_mark() {
 
     Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
     Atomic::store(&_preauthorization_debt, allocation_budget / 4);
-// KELVIN WANTS THIS CODE TO BE INCLUDED, BUT IT IS GENERATING COMPILE-TIME ERROR
-//    Atomic::store(&_incremental_phase_work_completed, 0);
-//    Atomic::store(&_incremental_allocation_budget, 0);
+    Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
+    Atomic::store(&_incremental_allocation_budget, allocation_budget / 4);
 
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
-    printf("ShenandoahPacer::generational setup_for_mark(), anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
-           _anticipated_phase_effort, _allocation_phase_budget);
+    printf("ShenandoahPacer::generational setup_for_mark(), planned effort: " SIZE_FORMAT ", allocate budget: " SIZE_FORMAT "\n",
+           projected_work, allocation_budget);
 #endif
-    log_info(gc, ergo)("Pacer for Mark: Expected Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s, ",
+
+    log_info(gc, ergo)("Pacer for Mark: Expected Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s",
                        byte_size_in_proper_unit(projected_work), proper_unit_for_byte_size(projected_work),
                        byte_size_in_proper_unit(allocation_budget), proper_unit_for_byte_size(allocation_budget));
     log_debug(gc)("Allocate/Work ratio during concurrent mark per_K is " SIZE_FORMAT, allocation_ratio);
@@ -148,11 +148,6 @@ void ShenandoahPacer::setup_for_evac() {
     size_t heap_usage = heap->used();
     size_t collection_set_usage = collection_set->used();
 
-#define KELVIN_VERBOSE
-#ifdef KELVIN_VERBOSE
-    printf("ShenandoahPacer::generational setup_for_evac(),  anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
-           _anticipated_phase_effort, _allocation_phase_budget);
-#endif
     // Recompute available.  Though pacing during mark prevents us from over-allocating within available, we may have earned
     // an unexpected benefit if immediate trash was found and recycled at end of concurrent marking.  Also, if allocation
     // rate was slower than GC rate, we may have more than the planned amount of memory available right now.
@@ -172,8 +167,8 @@ void ShenandoahPacer::setup_for_evac() {
     // Remember how much memory was marked by young-gen concurrent marking.  This is memory below TAMS, aka live at start
     // of young-gen concurrent marking with SATB barrier.  This can be calculated as total young usage minus memory
     // allocated since start of young-gen GC.
-    _most_recent_live_bytes = (_heap->young_generation()->heuristics()->get_live_bytes()
-                               - _heap->young_generation()->bytes_allocated_since_gc_start());
+    _most_recent_young_live_bytes = (_heap->young_generation()->heuristics()->get_live_bytes()
+                                     - _heap->young_generation()->bytes_allocated_since_gc_start());
     // evacuation needs to read and write every word
     // update-refs needs to read every pointer field and if the reference resides in collection-set (from-space), find the
     // forwarding pointer and then overwrite the original word.  This is more work on fewer numbers of values.  We don't have
@@ -192,15 +187,15 @@ void ShenandoahPacer::setup_for_evac() {
 
     Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
     Atomic::store(&_preauthorization_debt, evac_allocation_budget / 4);
-    Atomic::store(&_incremental_phase_work_completed, 0);
-    Atomic::store(&_incremental_allocation_budget, 0);
+    Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
+    Atomic::store(&_incremental_allocation_budget, evac_allocation_budget / 4);
 
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
-    printf("ShenandoahPacer::generational setup_for_mark(), anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
-           _anticipated_phase_effort, _allocation_phase_budget);
+    printf("ShenandoahPacer::generational setup_for_evac(),  anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
+           evacuation_workload, evac_allocation_budget);
 #endif
-    log_info(gc, ergo)("Pacer for Evacuation: Expected Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s, ",
+    log_info(gc, ergo)("Pacer for Evacuation: Expected Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s",
                        byte_size_in_proper_unit(evacuation_workload), proper_unit_for_byte_size(evacuation_workload),
                        byte_size_in_proper_unit(evac_allocation_budget), proper_unit_for_byte_size(evac_allocation_budget));
     log_debug(gc)("Allocate/Work ratio during evacuation per_K is " SIZE_FORMAT, allocation_ratio);
@@ -237,11 +232,6 @@ void ShenandoahPacer::setup_for_updaterefs() {
     size_t heap_usage = heap->used();
     size_t collection_set_usage = collection_set->used();
 
-#define KELVIN_VERBOSE
-#ifdef KELVIN_VERBOSE
-    printf("ShenandoahPacer::generational setup_for_evac(),  anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
-           _anticipated_phase_effort, _allocation_phase_budget);
-#endif
     // Recompute available.  Let's see how much of the previously available budget was consumed during evacuation.
     size_t update_refs_allocation_budget = _heap->young_generation()->available();
     size_t update_refs_workload = _usage_below_update_watermark;
@@ -250,15 +240,15 @@ void ShenandoahPacer::setup_for_updaterefs() {
 
     Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
     Atomic::store(&_preauthorization_debt, update_refs_allocation_budget / 4);
-    Atomic::store(&_incremental_phase_work_completed, 0);
+    Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
     Atomic::store(&_incremental_allocation_budget, update_refs_allocation_budget / 4);
 
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
-    printf("ShenandoahPacer::generational setup_for_mark(), anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
-           _anticipated_phase_effort, _allocation_phase_budget);
+    printf("ShenandoahPacer::generational setup_for_update_refs(),  projected work: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
+           update_refs_workload, update_refs_allocation_budget);
 #endif
-    log_info(gc, ergo)("Pacer for Updating Refs: Expected Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s, ",
+    log_info(gc, ergo)("Pacer for Updating Refs: Expected Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s",
                        byte_size_in_proper_unit(update_refs_workload), proper_unit_for_byte_size(update_refs_workload),
                        byte_size_in_proper_unit(update_refs_allocation_budget),
                        proper_unit_for_byte_size(update_refs_allocation_budget));
@@ -309,10 +299,12 @@ void ShenandoahPacer::setup_for_idle() {
   if (_is_generational) {
     if (_heap->is_concurrent_old_mark_in_progress()) {
       if (_concurrent_old_interruption_count++ == 0) {
+        // This is the first increment of old-gen work on concurrent marking.
+
         size_t old_used = _heap->old_generation()->used();
-        if (_previous_old_live <= 0) {
+        if (_most_recent_old_live_bytes == 0) {
           // The first time we do old-gen collection, we're flying blind.  Conservatively, plan to mark everything.
-          _previous_old_live = old_used / 2;
+          _most_recent_old_live_bytes = old_used / 2;
         }
 
         // This is the first of potentially many increments of old-gen concurrent marking efforts.
@@ -322,15 +314,15 @@ void ShenandoahPacer::setup_for_idle() {
         _planned_old_marking_passes = (3 * ShenandoahPacingOldRatio) / 4;
 
         // Use a negative value to indicate that we haven't yet started preparation for mixed evacuation.
-        _planned_old_mixed_evacuation_passes = -(ShenandoahPacingOldRatio - _planned_old_marking_passes);
-        if (_planned_old_mixed_evacuation_passes == 0) {
-          _planned_old_mixed_evacuation_passes = -1; // Assure at least one increment of work to prep for mixed evac.
+        _planned_old_mixed_evac_prep_passes = -(ShenandoahPacingOldRatio - _planned_old_marking_passes);
+        if (_planned_old_mixed_evac_prep_passes == 0) {
+          _planned_old_mixed_evac_prep_passes = -1; // Assure at least one increment of work to prep for mixed evac.
         }
 
         // Estimate the upper bound to be twice the amount of live memory detected by the previous old-gen concurrent
         // mark pass, but no more than old_generation->used();  Since we are normally running with old-gen at utilization
         // above 50%, the _total_planned_old_marking_effort will typically equal old_used.
-        _total_planned_old_effort = MIN2(_previous_old_live * 2, old_used);
+        _total_planned_old_effort = MIN2(_most_recent_old_live_bytes * 2, old_used);
 
         // Our estimate is "conservative".  Normally, old-gen marking will complete will ahead of the planned number
         // of old marking passes, because the amount of live memory is typically much less than _total_planned_old_marking_effort.
@@ -338,14 +330,14 @@ void ShenandoahPacer::setup_for_idle() {
         // requiring that the last increment of marking perform enough work to completely mark all of old_used.  In the
         // rare event that _total_planned_old_marking_effort is less than old_used, add the extra effort required to mark
         // all of old used during the last planned increment of old-gen concurrent marking.
-        _last_marking_increment_supplemental_effort = old_used - _total_planned_old_effort;
+        _last_mark_increment_supplement = old_used - _total_planned_old_effort;
 
       }
       size_t increment_effort;
       if (_planned_old_marking_passes-- > 0) {
         if (_planned_old_marking_passes == 0) {
           // This is the last planned increment of concurrent marking
-          increment_effort = _total_planned_old_effort + _last_marking_increment_supplemental_effort;
+          increment_effort = _total_planned_old_effort + _last_mark_increment_supplement;
           // This is last increment of concurrent marking.  Then, we'll overwrite _total_planned_old_effort below.
         } else {
           increment_effort = _total_planned_old_effort / (_planned_old_marking_passes + 1);
@@ -360,18 +352,22 @@ void ShenandoahPacer::setup_for_idle() {
       } else {
         allocation_budget = 0;       // Don't allow any allocation during this old-gen increment!
       }
+
+      // Since idle phases are not front-loaded with allocations, we preauthorize a smaller fraction of total
+      // allocation buffer.  This reduces the likelihood that we will experience allocation stalls near the
+      // end of this idle phase.
       size_t allocation_ratio = allocation_budget * 1024 / increment_effort;
       Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
       Atomic::store(&_preauthorization_debt, allocation_budget / 8);
-      Atomic::store(&_incremental_phase_work_completed, 0);
+      Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
       Atomic::store(&_incremental_allocation_budget, allocation_budget / 8);
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
-      printf("ShenandoahPacer::generational setup_for_idle concurrent marking, anticipated effort: " SIZE_FORMAT
-             ", budget: " SIZE_FORMAT "\n", increment_effort, allocation_budget);
+      printf("ShenandoahPacer::generational setup_for_idle concurrent marking, anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
+             increment_effort, allocation_budget);
 #endif
-      log_info(gc, ergo)("Pacer for Idle span: Expected Concurrent Marking Work: " SIZE_FORMAT
-                         "%s, Phase Allocation Budget: " SIZE_FORMAT "%s, ",
+      log_info(gc, ergo)("Pacer for Idle span: Expected Concurrent Marking Work: " SIZE_FORMAT 
+                         "%s, Phase Allocation Budget: " SIZE_FORMAT "%s",
                          byte_size_in_proper_unit(increment_effort), proper_unit_for_byte_size(increment_effort),
                          byte_size_in_proper_unit(allocation_budget), proper_unit_for_byte_size(allocation_budget));
       log_debug(gc)("Allocate/Work ratio during Concurrent Marking per_K is " SIZE_FORMAT, allocation_ratio);
@@ -385,16 +381,16 @@ void ShenandoahPacer::setup_for_idle() {
 
     else if (_heap->is_concurrent_prep_for_mixed_evacuation_in_progress()) {
       assert(!_heap->is_concurrent_old_mark_in_progress(), "Finish old-gen marking before preparationfor mixed evacuation");
-      if (_planned_old_mixed_evacuation_passes <= 0) {
+      if (_planned_old_mixed_evac_prep_passes < 0) {
         // This is the first of potentially several preparation for mixed evacuation increments of work.
-        _planned_prep_mixed_evacuation_passes = -_planned_old_mixed_evacuation_passes;
         if (_planned_old_marking_passes > 0) {
           // If we finished concurrent marking ahead of schedule, relax pacing constraints on prep for mixed evacuation.
-          _planned_prep_mixed_evacuation_passes += _planned_old_marking_passes;
+          _planned_old_mixed_evac_prep_passes += _planned_old_marking_passes;
         }
         _total_planned_old_effort = _heap->old_generation()->used() - _heap->old_heuristics()->old_collection_candidates_used();
       }
-      size_t increment_effort = _total_planned_effort / _planned_prep_mixed_evacuation_passes;
+      size_t increment_effort = _total_planned_old_effort / _planned_old_mixed_evac_prep_passes;
+      _planned_old_mixed_evac_prep_passes -= 1;
       _total_planned_old_effort -= increment_effort;
       size_t young_available = _heap->young_generation()->available();
       size_t young_trigger = _heap->young_generation()->heuristics()->start_gc_threshold();
@@ -406,6 +402,10 @@ void ShenandoahPacer::setup_for_idle() {
                                      // have to stall all mutator threads and defer all alloctions until we've completed
                                      // the requisite amount of old-gen effort.
       }
+
+      // Since idle phases are not front-loaded with allocations, we preauthorize a smaller fraction of total
+      // allocation buffer.  This reduces the likelihood that we will experience allocation stalls near the
+      // end of this idle phase.
       size_t allocation_ratio = allocation_budget * 1024 / increment_effort;
       Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
       Atomic::store(&_preauthorization_debt, allocation_budget / 8);
@@ -414,9 +414,10 @@ void ShenandoahPacer::setup_for_idle() {
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
       printf("ShenandoahPacer::generational setup_for_idle prep for mixed evacuations, anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
-             incremental_effort, allocation_budget);
+             increment_effort, allocation_budget);
 #endif
-      log_info(gc, ergo)("Pacer for Idle span: Expected Mixed Evac Prep Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s, "
+      log_info(gc, ergo)("Pacer for Idle span: Expected Mixed Evac Prep Work: " SIZE_FORMAT
+                         "%s, Phase Allocation Budget: " SIZE_FORMAT "%s",
                          byte_size_in_proper_unit(increment_effort), proper_unit_for_byte_size(increment_effort),
                          byte_size_in_proper_unit(allocation_budget), proper_unit_for_byte_size(allocation_budget));
       log_debug(gc)("Allocate/Work ratio during Mixed Evac Prep per_K is " SIZE_FORMAT, allocation_ratio);
@@ -455,10 +456,7 @@ void ShenandoahPacer::setup_for_reset() {
 #endif
     // Disable pacing.
     Atomic::store(&_incremental_phase_work_completed, PHASE_WORK_PACING_DISABLED);
-    // Generational mode needs a different log message here
-    // log_info(gc, ergo)("Pacer for Reset. Non-Taxable: " SIZE_FORMAT "%s",
-    //    byte_size_in_proper_unit(initial), proper_unit_for_byte_size(initial));
-
+    log_info(gc, ergo)("Pacer for Generational Reset: pacing is disabled");
   } else {
     size_t initial = _heap->max_capacity();
 #define KELVIN_VERBOSE
@@ -519,11 +517,9 @@ bool ShenandoahPacer::claim_for_alloc(size_t words, bool force) {
   return true;
 }
 
-bool ShenandoahPacer::claim_for_generational_alloc(size_t words, bool force) {
+bool ShenandoahPacer::claim_for_generational_alloc(size_t words) {
   assert(ShenandoahPacing, "Only be here when pacing is enabled");
   assert(_is_generational, "Only be here when is generational");
-
-  assert(!force, "Force is not implemented for generational gc");
 
   // Try to claim credit for recently completed work.
   size_t phase_work;
@@ -531,7 +527,7 @@ bool ShenandoahPacer::claim_for_generational_alloc(size_t words, bool force) {
     phase_work = Atomic::load(&_incremental_phase_work_completed);
     if (phase_work == PHASE_WORK_PACING_DISABLED)
       break;
-  } while (Atomic::cmpxchg(&_incremental_phase_work_completed, phase_work, 0, memory_order_relaxed) != phase_work);
+  } while (Atomic::cmpxchg(&_incremental_phase_work_completed, phase_work, ((size_t) 0), memory_order_relaxed) != phase_work);
 
   size_t allocate_delta;
   if (phase_work != PHASE_WORK_PACING_DISABLED) {
@@ -616,7 +612,7 @@ void ShenandoahPacer::pace_for_alloc(size_t words) {
   printf("pace_for_alloc(words: " SIZE_FORMAT "), epoch " SIZE_FORMAT "\n", words, epoch());
 #endif
   if (_is_generational) {
-    bool claimed = claim_for_generational_alloc(words, false);
+    bool claimed = claim_for_generational_alloc(words);
     if (claimed) {
 #ifdef KELVIN_VERBOSE
       printf("  pace_for_alloc() successfully claimed, returning\n");

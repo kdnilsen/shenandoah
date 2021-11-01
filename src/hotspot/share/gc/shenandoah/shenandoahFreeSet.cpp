@@ -292,14 +292,22 @@ HeapWord* ShenandoahFreeSet::try_allocate_in(ShenandoahHeapRegion* r, Shenandoah
       // PLABs parsable while still allowing the PLAB to serve future allocation requests that arise during the
       // next evacuation pass.
       r->set_update_watermark(r->top());
-
       if (r->affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION) {
         _heap->young_generation()->increase_used(size * HeapWordSize);
+#define KELVIN_VERBOSE
+#ifdef KELVIN_VERBOSE
+        printf("try_allocate_in() increasing young-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT "\n",
+               size*HeapWordSize, _heap->young_generation()->used());
+#endif
       } else {
         assert(r->affiliation() == ShenandoahRegionAffiliation::OLD_GENERATION, "GC Alloc was not YOUNG so must be OLD");
         assert(req.type() != ShenandoahAllocRequest::_alloc_gclab, "old-gen allocations use PLAB or shared allocation");
         _heap->old_generation()->increase_used(size * HeapWordSize);
         // for plabs, we'll sort the difference between evac and promotion usage when we retire the plab
+#ifdef KELVIN_VERBOSE
+        printf("try_allocate_in() increasing old-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT "\n",
+               size*HeapWordSize, _heap->old_generation()->used());
+#endif
       }
     }
   }
@@ -317,7 +325,18 @@ HeapWord* ShenandoahFreeSet::try_allocate_in(ShenandoahHeapRegion* r, Shenandoah
       size_t waste = r->free();
       if (waste > 0) {
         increase_used(waste);
-        _heap->generation_for(req.affiliation())->increase_allocated(waste);
+        if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION) {
+          _heap->young_generation()->increase_used(waste);
+        } else if (req.affiliation() == ShenandoahRegionAffiliation::OLD_GENERATION) {
+          _heap->old_generation()->increase_used(waste);
+        }
+#ifdef KELVIN_VERBOSE
+        if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION) {
+          printf("try_allocate_in() YOUNG wastage of " SIZE_FORMAT " is reported as used\n", waste);
+        } else {
+          printf("try_allocate_in() OLD wastage of " SIZE_FORMAT " is reported as used\n", waste);
+        }
+#endif
         _heap->notify_mutator_alloc_words(waste >> LogHeapWordSize, true);
       }
     }
@@ -453,15 +472,33 @@ HeapWord* ShenandoahFreeSet::allocate_contiguous(ShenandoahAllocRequest& req) {
   increase_used(ShenandoahHeapRegion::region_size_bytes() * num);
   if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION) {
     _heap->young_generation()->increase_used(words_size * HeapWordSize);
+#ifdef KELVIN_VERBOSE
+    printf("allocate_continuous() increasing young-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT "\n",
+           words_size * HeapWordSize, _heap->young_generation()->used());
+#endif
   } else if (req.affiliation() == ShenandoahRegionAffiliation::OLD_GENERATION) {
     _heap->old_generation()->increase_used(words_size * HeapWordSize);
+#ifdef KELVIN_VERBOSE
+    printf("allocate_contiguous() increasing old-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT "\n",
+           words_size * HeapWordSize, _heap->old_generation()->used());
+#endif
   }
 
   if (remainder != 0) {
     // Record this remainder as allocation waste
     size_t waste = ShenandoahHeapRegion::region_size_words() - remainder;
+    if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION) {
+      _heap->young_generation()->increase_used(waste * HeapWordSize);
+    } else if (req.affiliation() == ShenandoahRegionAffiliation::OLD_GENERATION) {
+      _heap->old_generation()->increase_used(waste * HeapWordSize);
+    }
     _heap->notify_mutator_alloc_words(waste, true);
-    _heap->generation_for(req.affiliation())->increase_allocated(waste * HeapWordSize);
+#ifdef KELVIN_VERBOSE
+    if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION)
+      printf("allocate_contiguous() YOUNG wastage of " SIZE_FORMAT " is reported as used\n", waste * HeapWordSize);
+    else if (req.affiliation() == ShenandoahRegionAffiliation::OLD_GENERATION)
+      printf("allocate_contiguous() OLD wastage of " SIZE_FORMAT " is reported as used\n", waste * HeapWordSize);
+#endif
   }
 
   // Allocated at left/rightmost? Move the bounds appropriately.

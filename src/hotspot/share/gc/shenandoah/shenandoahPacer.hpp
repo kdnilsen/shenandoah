@@ -54,9 +54,20 @@ private:
   ShenandoahSharedFlag _need_notify_waiters;
 
   // Set once per phase
+  intptr_t _planned_old_marking_passes;               // Generational: how many old-gen increments of work planned for marking
+  intptr_t _planned_old_mixed_evac_prep_passes;       // Generational: how many old-gen increments of work planned for evac prep
+  size_t _total_planned_old_effort;                   // Generational: Total effort planned for current old effort, replenished
+                                                      //               at start of concurrent mark and evac-prep passes
+  size_t _last_mark_increment_supplement;             // Generational: plan to invest this much extra effort in the last increment
+                                                      //               of mark work if original _total_planned_old_effort was
+                                                      //               not sufficient to complete marking effort
   size_t _concurrent_old_interruption_count;          // Generational: how many times has old-gen been interrupted
-  size_t _most_recent_live_bytes;                     // Generational: young-gen bytes live at end of most recent young mark
-  size_t _usage_below_update_watermark;               // Generational: how much memory to be processed by update refss
+  size_t _most_recent_young_live_bytes;               // Generational: young-gen bytes live at end of most recent young mark (0
+                                                      //               means not yet initialized)
+  size_t _most_recent_old_live_bytes;                 // Generational: old-gen bytes live at end of most recent old mark (0
+                                                      //               means not yet initialized)
+  size_t _usage_below_update_watermark;               // Generational: how much memory to be processed by update refs
+
   volatile size_t _allocation_per_work_ratio_per_K;   // Generational: 1024 times the number of heapwords that can be
                                                       // allocated for each heapword of work completed.
 
@@ -204,7 +215,7 @@ private:
   volatile intptr_t _budget;  // non-generational: similar to _incremental_allocation_budget.  could union with that.
   shenandoah_padding(1);
   // Allow these three variables to occupy the same cache line because we'll generally want their values together.
-  volatile size_t _incremental_phase_work_completed;   // for generational, increments of work that have been completed
+  volatile size_t _incremental_phase_work_completed; // for generational, increments of work that have been completed
   volatile size_t _incremental_allocation_budget;      // for generational, how much memory can be allocated right now?
   volatile size_t _preauthorization_debt;              // for generational, debt to be paid on allocation preauthorizations
 #define KELVIN_FIX_COMPILE
@@ -213,9 +224,7 @@ private:
   volatile size_t _anticipated_phase_effort;
   volatile size_t _allocation_phase_budget;
   volatile size_t _previous_old_live;
-  volatile size_t _planned_old_marking_passes;
   volatile size_t _planned_old_mixed_evacuation_passes;
-  volatile size_t _total_planned_old_effort;
   volatile size_t _last_marking_increment_supplemental_effort;
   volatile size_t _planned_prep_mixed_evacuation_passes;
   volatile size_t _total_planned_effort;
@@ -236,6 +245,11 @@ public:
           _last_time(os::elapsedTime()),
           _progress_history(new TruncatedSeq(5)),
           _wait_monitor(new Monitor(Mutex::safepoint-1, "ShenandoahWaitMonitor_lock", true)),
+          _concurrent_old_interruption_count(0),
+          _most_recent_young_live_bytes(0),
+          _most_recent_old_live_bytes(0),
+          _usage_below_update_watermark(0),
+          _allocation_per_work_ratio_per_K(0),
           _epoch(0),
           _tax_rate(1),
           _budget(0),
@@ -261,7 +275,7 @@ public:
 
   inline void report_alloc(size_t words);
 
-  bool claim_for_generational_alloc(size_t words, bool force);
+  bool claim_for_generational_alloc(size_t words);
   bool claim_for_alloc(size_t words, bool force);
   void pace_for_alloc(size_t words);
   void unpace_for_alloc(intptr_t epoch, size_t words);
