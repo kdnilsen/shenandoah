@@ -38,8 +38,14 @@ inline void ShenandoahPacer::report_mark(size_t words) {
   // overhead between background GC threads and the pacer.
   printf("report_mark(" SIZE_FORMAT ") is adding words to budget\n", words);
 #endif
-  report_internal(words);
-  report_progress_internal(words);
+  if (_heap->mode()->is_generational()) {
+    // Generational pacing reports words evacuated as progress, allowing impact on budget to be scaled.  It's not
+    // clear why non-generational pacing also increases allocation budget directly without scale.
+    report_progress_internal(words);
+  } else {
+    report_internal(words);
+    report_progress_internal(words);
+  }
 }
 
 inline void ShenandoahPacer::report_evac(size_t words) {
@@ -49,17 +55,29 @@ inline void ShenandoahPacer::report_evac(size_t words) {
   // region.  This indicates some amount of progress by the evacuator.
   printf("report_evac(" SIZE_FORMAT ") is adding words to budget\n", words);
 #endif
-  report_internal(words);
+  if (_heap->mode()->is_generational()) {
+    // Generational pacing reports words evacuated as progress, allowing impact on budget to be scaled.  It's not
+    // clear why non-generational pacing increases allocation budget directly without scale.
+    report_progress_internal(words);
+  } else {
+    report_internal(words);
+  }
 }
 
 inline void ShenandoahPacer::report_updaterefs(size_t words) {
 #ifdef KELVIN_VERBOSE
   // This is apparently called every time we've updated references within a heap region.  The argument is the number
   // of words between bottom() and update_watermark.  Many invocations have words == 0 (regions that came into existence
-  // following start of evacuation will not hold pointers to from-space).
+  // following start of evacuation will not hold pointers to from-space (update_watermark equals bottom)).
   printf("report_updaterefs(" SIZE_FORMAT ") is adding words to budget\n", words);
 #endif
-  report_internal(words);
+  if (_heap->mode()->is_generational()) {
+    // Generational pacing reports reference words updated as progress, allowing impact on budget to be scaled.  It's not
+    // clear why non-generational pacing increases allocation budget directly without scale.
+    report_progress_internal(words);
+  } else {
+    report_internal(words);
+  }
 }
 
 inline void ShenandoahPacer::report_alloc(size_t words) {
@@ -70,7 +88,11 @@ inline void ShenandoahPacer::report_alloc(size_t words) {
   // have taken place while we are working on gc.
   printf("report_alloc(" SIZE_FORMAT ") is adding words to budget (seems bass ackwards to increment for budget for allocs seen)\n", words);
 #endif
-  report_internal(words);
+  // Generational pacing does not add to allocation budget when we allocate memory.  It is unclear why non-generational
+  // pacing does this.
+  if (!_heap->mode()->is_generational()) {
+    report_internal(words);
+  }
 }
 
 inline void ShenandoahPacer::report_internal(size_t words) {

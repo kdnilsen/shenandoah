@@ -59,7 +59,7 @@
  */
 
 #ifndef FUBAR
-#define _is_generational is_generational()
+#define _is_generational _heap->mode()->is_generational()
 #else
 bool ShenandoahPacer::is_generational() {
   return _heap->mode()->is_generational();
@@ -97,12 +97,12 @@ void ShenandoahPacer::setup_for_mark() {
     // marking is typically the most time consuming phase of GC (e.g. 70%).  Recognize that any immediate trash
     // reclaimed at the end of concurrent marking will allow us to expand the budget when we begin concurrent evacuation.
     // In other words, allowing 75% of available to be allocated during concurrent marking is probably conservative.
-    size_t allocation_budget = 3 * _heap->young_generation()->available() / 4;
-    size_t allocation_ratio = allocation_budget * 1024 / projected_work;
+    intptr_t allocation_budget = (intptr_t) (3 * _heap->young_generation()->available() / 4);
+    intptr_t allocation_ratio = allocation_budget * 1024 / projected_work;
 
     Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
     Atomic::store(&_preauthorization_debt, allocation_budget / 4);
-    Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
+    Atomic::store(&_incremental_phase_work_completed, 0L);
     Atomic::store(&_incremental_allocation_budget, allocation_budget / 4);
 
 #define KELVIN_VERBOSE
@@ -113,7 +113,8 @@ void ShenandoahPacer::setup_for_mark() {
 
     log_info(gc, ergo)("Pacer for Mark: Expected Work: " SIZE_FORMAT "%s, Phase Allocation Budget: " SIZE_FORMAT "%s",
                        byte_size_in_proper_unit(projected_work), proper_unit_for_byte_size(projected_work),
-                       byte_size_in_proper_unit(allocation_budget), proper_unit_for_byte_size(allocation_budget));
+                       byte_size_in_proper_unit((size_t) allocation_budget),
+                       proper_unit_for_byte_size((size_t) allocation_budget));
     log_debug(gc)("Allocate/Work ratio during concurrent mark per_K is " SIZE_FORMAT, allocation_ratio);
   } else {
     size_t live = update_and_get_progress_history();
@@ -185,10 +186,10 @@ void ShenandoahPacer::setup_for_evac() {
     size_t evac_allocation_budget = (size_t) (available * percent_evac);
     size_t allocation_ratio = evac_allocation_budget * 1024 / evacuation_workload;
 
-    Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
-    Atomic::store(&_preauthorization_debt, evac_allocation_budget / 4);
-    Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
-    Atomic::store(&_incremental_allocation_budget, evac_allocation_budget / 4);
+    Atomic::store(&_allocation_per_work_ratio_per_K, (intptr_t) allocation_ratio);
+    Atomic::store(&_preauthorization_debt, (intptr_t) evac_allocation_budget / 4);
+    Atomic::store(&_incremental_phase_work_completed, 0L);
+    Atomic::store(&_incremental_allocation_budget, (intptr_t) evac_allocation_budget / 4);
 
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
@@ -235,13 +236,12 @@ void ShenandoahPacer::setup_for_updaterefs() {
     // Recompute available.  Let's see how much of the previously available budget was consumed during evacuation.
     size_t update_refs_allocation_budget = _heap->young_generation()->available();
     size_t update_refs_workload = _usage_below_update_watermark;
-
     size_t allocation_ratio = update_refs_allocation_budget * 1024 / update_refs_workload;
 
-    Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
-    Atomic::store(&_preauthorization_debt, update_refs_allocation_budget / 4);
-    Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
-    Atomic::store(&_incremental_allocation_budget, update_refs_allocation_budget / 4);
+    Atomic::store(&_allocation_per_work_ratio_per_K, (intptr_t) allocation_ratio);
+    Atomic::store(&_preauthorization_debt, (intptr_t) update_refs_allocation_budget / 4);
+    Atomic::store(&_incremental_phase_work_completed, 0L);
+    Atomic::store(&_incremental_allocation_budget, (intptr_t) update_refs_allocation_budget / 4);
 
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
@@ -357,10 +357,11 @@ void ShenandoahPacer::setup_for_idle() {
       // allocation buffer.  This reduces the likelihood that we will experience allocation stalls near the
       // end of this idle phase.
       size_t allocation_ratio = allocation_budget * 1024 / increment_effort;
-      Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
-      Atomic::store(&_preauthorization_debt, allocation_budget / 8);
-      Atomic::store(&_incremental_phase_work_completed, ((size_t) 0));
-      Atomic::store(&_incremental_allocation_budget, allocation_budget / 8);
+      Atomic::store(&_allocation_per_work_ratio_per_K, (intptr_t) allocation_ratio);
+      Atomic::store(&_preauthorization_debt, (intptr_t) allocation_budget / 8);
+      Atomic::store(&_incremental_phase_work_completed, 0L);
+      Atomic::store(&_incremental_allocation_budget, (intptr_t) allocation_budget / 8);
+
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
       printf("ShenandoahPacer::generational setup_for_idle concurrent marking, anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
@@ -407,10 +408,10 @@ void ShenandoahPacer::setup_for_idle() {
       // allocation buffer.  This reduces the likelihood that we will experience allocation stalls near the
       // end of this idle phase.
       size_t allocation_ratio = allocation_budget * 1024 / increment_effort;
-      Atomic::store(&_allocation_per_work_ratio_per_K, allocation_ratio);
-      Atomic::store(&_preauthorization_debt, allocation_budget / 8);
-      Atomic::store(&_incremental_phase_work_completed, 0);
-      Atomic::store(&_incremental_allocation_budget, allocation_budget / 8);
+      Atomic::store(&_allocation_per_work_ratio_per_K, (intptr_t) allocation_ratio);
+      Atomic::store(&_preauthorization_debt, (intptr_t) allocation_budget / 8);
+      Atomic::store(&_incremental_phase_work_completed, 0L);
+      Atomic::store(&_incremental_allocation_budget, (intptr_t) allocation_budget / 8);
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
       printf("ShenandoahPacer::generational setup_for_idle prep for mixed evacuations, anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
@@ -424,8 +425,8 @@ void ShenandoahPacer::setup_for_idle() {
     }
 #endif  // KELVIN_DEPRECATE
     else {
-      // Disable pacing.
-      Atomic::store(&_incremental_phase_work_completed, PHASE_WORK_PACING_DISABLED);
+      // Set _incremental_phase_work_completed to -1, effectively disabling pacing.
+      Atomic::store(&_incremental_phase_work_completed, -1L);
     }
   } else {
     size_t initial = _heap->max_capacity() / 100 * ShenandoahPacingIdleSlack;
@@ -455,7 +456,7 @@ void ShenandoahPacer::setup_for_reset() {
     printf("ShenandoahPacer::generational setup_for_reset()\n");
 #endif
     // Disable pacing.
-    Atomic::store(&_incremental_phase_work_completed, PHASE_WORK_PACING_DISABLED);
+    Atomic::store(&_incremental_phase_work_completed, -1L);
     log_info(gc, ergo)("Pacer for Generational Reset: pacing is disabled");
   } else {
     size_t initial = _heap->max_capacity();
@@ -517,30 +518,46 @@ bool ShenandoahPacer::claim_for_alloc(size_t words, bool force) {
   return true;
 }
 
+// Account for allocations that cannot be avoided and cannot be blocked, such as when an attaching JNI thread needs to
+// allocate memory and when a GC thread creates waste or alignment padding within young-gen memory.
+void ShenandoahPacer::force_generational_claim_for_alloc(size_t words) {
+
+#define KELVIN_VERBOSE
+#ifdef KELVIN_VERBOSE
+  printf("force_generational_claim_for_alloc(" SIZE_FORMAT ")\n", words);
+#endif
+  // Don't bother to account for recently completed work.  It won't impact whether or not this allocation is "approved".
+  intptr_t allocate_budget, new_allocate_budget;
+  do {
+    allocate_budget = Atomic::load(&_incremental_allocation_budget);
+    new_allocate_budget = allocate_budget - words;
+  } while (Atomic::cmpxchg(&_incremental_allocation_budget, allocate_budget, new_allocate_budget, memory_order_relaxed)
+           != allocate_budget);
+}
+
 bool ShenandoahPacer::claim_for_generational_alloc(size_t words) {
   assert(ShenandoahPacing, "Only be here when pacing is enabled");
   assert(_is_generational, "Only be here when is generational");
 
   // Try to claim credit for recently completed work.
-  size_t phase_work;
+  intptr_t phase_work;
   do {
     phase_work = Atomic::load(&_incremental_phase_work_completed);
-    if (phase_work == PHASE_WORK_PACING_DISABLED)
+    if (phase_work <= 0)
       break;
-  } while (Atomic::cmpxchg(&_incremental_phase_work_completed, phase_work, ((size_t) 0), memory_order_relaxed) != phase_work);
+  } while (Atomic::cmpxchg(&_incremental_phase_work_completed, phase_work, 0L, memory_order_relaxed) != phase_work);
 
   size_t allocate_delta;
-  if (phase_work != PHASE_WORK_PACING_DISABLED) {
+  if (phase_work > 0) {
     // Since we claimed credit for recently completed work, we'll try to adjust the allocation budget to account both for
     // recently completed work and for my current allocation request.
 
     size_t allocate_ratio = Atomic::load(&_allocation_per_work_ratio_per_K);
     allocate_delta = (phase_work * allocate_ratio) / 1024;
-    size_t preauthorization_payment = allocate_delta / 4;
+    intptr_t preauthorization_payment = allocate_delta / 4;
 
     // Pay down my debt.
-    size_t preauthorized_debt;
-    size_t new_debt;
+    intptr_t preauthorized_debt, new_debt;
     do {
       preauthorized_debt = Atomic::load(&_preauthorization_debt);
       if (preauthorization_payment > preauthorized_debt) {
@@ -553,8 +570,8 @@ bool ShenandoahPacer::claim_for_generational_alloc(size_t words) {
     if (allocate_delta >= words) {
       allocate_delta -= words;
       if (allocate_delta > 0) {
-        // Incremental budget so others can allocate. 
-        size_t allocate_budget, new_allocate_budget;
+        // Increment budget so others can allocate. 
+        intptr_t allocate_budget, new_allocate_budget;
         do {
           allocate_budget = Atomic::load(&_incremental_allocation_budget);
           new_allocate_budget = allocate_budget + allocate_delta;
@@ -569,7 +586,7 @@ bool ShenandoahPacer::claim_for_generational_alloc(size_t words) {
 
   // We know that allocate_delta < words.  It may equal 0.
   // See if allocate_delta + _allocate_budget > words
-  size_t allocate_budget, new_allocate_budget;
+  intptr_t allocate_budget, new_allocate_budget;
   do {
     allocate_budget = Atomic::load(&_incremental_allocation_budget);
     if (allocate_budget + allocate_delta < words) {
@@ -612,6 +629,7 @@ void ShenandoahPacer::pace_for_alloc(size_t words) {
   printf("pace_for_alloc(words: " SIZE_FORMAT "), epoch " SIZE_FORMAT "\n", words, epoch());
 #endif
   if (_is_generational) {
+    // With generational GC, this service never forces the claim.  We wait until GC has caught up with allocators.
     bool claimed = claim_for_generational_alloc(words);
     if (claimed) {
 #ifdef KELVIN_VERBOSE
@@ -620,8 +638,43 @@ void ShenandoahPacer::pace_for_alloc(size_t words) {
       return;
     }
 
+    // Threads that are attaching should not block at all: they are not fully initialized yet. Blocking them would be
+    // awkward.  This is probably the path that allocates the thread oop itself.
+    if (JavaThread::current()->is_attaching_via_jni()) {
+      force_generational_claim_for_alloc(words);
+#ifdef KELVIN_VERBOSE
+      printf("  pace_for_alloc() not stalling because is_attaching_via_jni\n");
+#endif
+      return;
+    }
+
+    double start = os::elapsedTime();
+    intptr_t pacer_epoch = epoch();
+    do {
+      // We could instead assist GC, but this would suffice for now.
+      wait(ShenandoahPacingMaxDelay);
+      bool claimed = claim_for_generational_alloc(words);
+      if (claimed) {
+#ifdef KELVIN_VERBOSE
+        printf("  pace_for_alloc() successfully claimed, returning\n");
+#endif
+        // Exit if the budget has been replenished, which means our claim is satisfied.
+        double end = os::elapsedTime();
+        ShenandoahThreadLocalData::add_paced_time(JavaThread::current(), end - start);
+        return;
+      }
+    } while (epoch() == pacer_epoch);
+
+    // Exit since the pacer epoch has advanced.  It may be that pacing is disabled in the new epoch, but in case
+    // pacing is still enabled, account for the allocation here.
+    force_generational_claim_for_alloc(words);
+    double end = os::elapsedTime();
+    ShenandoahThreadLocalData::add_paced_time(JavaThread::current(), end - start);
+    return;
+
   } else {
     // Fast path: try to allocate right away
+
     bool claimed = claim_for_alloc(words, false);
     if (claimed) {
 #ifdef KELVIN_VERBOSE

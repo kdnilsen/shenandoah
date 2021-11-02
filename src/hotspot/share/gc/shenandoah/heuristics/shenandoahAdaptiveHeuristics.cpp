@@ -378,7 +378,7 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
 #define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
   log_info(gc)("should_start_gc (%s)? used: " SIZE_FORMAT ", available: " SIZE_FORMAT
-               "\n                 soft_max_capacity: " SIZE_FORMAT ", max_capacity: " SIZE_FORMAT ", allocated: " SIZE_FORMAT,
+               " soft_max_capacity: " SIZE_FORMAT ", max_capacity: " SIZE_FORMAT ", allocated: " SIZE_FORMAT,
          _generation->name(), _generation->used(), available, capacity, max_capacity, allocated);
 #endif
   // Make sure the code below treats available without the soft tail.

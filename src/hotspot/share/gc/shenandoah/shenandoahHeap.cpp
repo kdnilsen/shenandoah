@@ -722,7 +722,12 @@ void ShenandoahHeap::notify_mutator_alloc_words(size_t words, bool waste) {
   if (ShenandoahPacing) {
     control_thread()->pacing_notify_alloc(words);
     if (waste) {
-      pacer()->claim_for_alloc(words, true);
+      if (mode()->is_generational()) {
+        // Since this is a mutator allocation, we know it is directed to young-gen memory.
+        pacer()->force_generational_claim_for_alloc(words);
+      } else {
+        pacer()->claim_for_alloc(words, true);
+      }
     }
   }
 }
@@ -1148,6 +1153,9 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
     //
     // Then, we need to make sure the allocation was retried after at least one
     // Full GC, which means we want to try more than ShenandoahFullGCThreshold times.
+
+    // It seems non-gen gc 
+
 
     size_t tries = 0;
 

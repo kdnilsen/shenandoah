@@ -68,7 +68,7 @@ private:
                                                       //               means not yet initialized)
   size_t _usage_below_update_watermark;               // Generational: how much memory to be processed by update refs
 
-  volatile size_t _allocation_per_work_ratio_per_K;   // Generational: 1024 times the number of heapwords that can be
+  volatile intptr_t _allocation_per_work_ratio_per_K; // Generational: 1024 times the number of heapwords that can be
                                                       // allocated for each heapword of work completed.
 
   volatile intptr_t _epoch;
@@ -205,9 +205,6 @@ private:
 
   // Heavily updated, protect from accidental false sharing
 
-  static const size_t PHASE_WORK_PACING_DISABLED = (size_t) -1;
-
-
   // TODO: each shenandoah_padding() instance introduces a 64-byte character buffer.  This intends to assure
   // that each heavily updated field resides within a distinct cache line.  We could achieve the same benefits
   // more concisely by inserting padding of size 64-8 = 56 bytes between each heavily updated HeapWord field.
@@ -215,20 +212,9 @@ private:
   volatile intptr_t _budget;  // non-generational: similar to _incremental_allocation_budget.  could union with that.
   shenandoah_padding(1);
   // Allow these three variables to occupy the same cache line because we'll generally want their values together.
-  volatile size_t _incremental_phase_work_completed; // for generational, increments of work that have been completed
-  volatile size_t _incremental_allocation_budget;      // for generational, how much memory can be allocated right now?
-  volatile size_t _preauthorization_debt;              // for generational, debt to be paid on allocation preauthorizations
-#define KELVIN_FIX_COMPILE
-#ifdef KELVIN_FIX_COMPILE
-  // One incremental commit along the way to ShenandoahPacing makes mention of these variables without defining them
-  volatile size_t _anticipated_phase_effort;
-  volatile size_t _allocation_phase_budget;
-  volatile size_t _previous_old_live;
-  volatile size_t _planned_old_mixed_evacuation_passes;
-  volatile size_t _last_marking_increment_supplemental_effort;
-  volatile size_t _planned_prep_mixed_evacuation_passes;
-  volatile size_t _total_planned_effort;
-#endif
+  volatile intptr_t _incremental_phase_work_completed;   // Generational: increments of work that have been completed
+  volatile intptr_t _incremental_allocation_budget;      // Generational: how much memory can be allocated right now?
+  volatile intptr_t _preauthorization_debt;              // Generational: debt to be paid on allocation preauthorizations
 
   // Heavily updated, protect from accidental false sharing
   shenandoah_padding(2);
@@ -275,6 +261,7 @@ public:
 
   inline void report_alloc(size_t words);
 
+  void force_generational_claim_for_alloc(size_t words);
   bool claim_for_generational_alloc(size_t words);
   bool claim_for_alloc(size_t words, bool force);
   void pace_for_alloc(size_t words);

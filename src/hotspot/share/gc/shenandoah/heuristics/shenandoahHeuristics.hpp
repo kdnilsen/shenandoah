@@ -87,7 +87,7 @@ protected:
   // have negligible cost unless proven otherwise.
   RegionData* _region_data;
 
-  uint _live_bytes;
+  size_t _live_bytes;
 
   uint _degenerated_cycles_in_a_row;
   uint _successful_cycles_in_a_row;
@@ -175,13 +175,18 @@ public:
 
   double time_since_last_gc() const;
 
-  void save_last_live_memory(size_t live_memory);
+   void save_last_live_memory(size_t live_memory);
   size_t get_last_live_memory();
   size_t get_penultimate_live_memory();
 
-  void set_live_bytes(size_t value);
+  void set_live_bytes(size_t value) {
+    _live_bytes = value;
+  }
+
   // May only be valid for young-gen heuristics.
-  size_t get_live_bytes();
+  size_t get_live_bytes() {
+    return _live_bytes;
+  }
 };
 
 #endif // SHARE_GC_SHENANDOAH_HEURISTICS_SHENANDOAHHEURISTICS_HPP
