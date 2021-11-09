@@ -76,4 +76,5 @@ void ShenandoahPassiveHeuristics::choose_collection_set_from_regiondata(Shenando
       cset->add_region(r);
     }
   }
+  cset->reserve_bytes_for_evacuation(live_cset);
 }

@@ -388,12 +388,21 @@
           "and complete before allocation failure is reached.")             \
                                                                             \
   product(uintx, ShenandoahPacingMaxDelay, 3, EXPERIMENTAL,                 \
-          "Max delay for pacing application allocations. Larger values "    \
+          "Max delay for pacing application allocations. With generational "\
+          "pacing, this is the duration of each of potentially many stalls "\
+          "experienced by a thread while it waits for GC to catch up with " \
+          "pace of allocation.  A smaller value allows the allocating "     \
+          "thread to more quickly discover that GC has caught up, at the "  \
+          "of more effort associated with more frequent testing of the "    \
+          "pacing condition.  With non-generational pacing, this is the "   \
+          "upper bound on how much time will any particular thread will be "\
+          "stalled on a single allocation request.  Larger values "         \
           "provide more resilience against out of memory, at expense of "   \
           "hiding the GC latencies in the allocation path. Time is in "     \
           "milliseconds. Setting it to arbitrarily large value makes "      \
           "GC effectively stall the threads indefinitely instead of going " \
           "to degenerated or Full GC.")                                     \
+          range(1, 1000)                                                    \
                                                                             \
   product(uintx, ShenandoahPacingIdleSlack, 2, EXPERIMENTAL,                \
           "How much of heap counted as non-taxable allocations during idle "\

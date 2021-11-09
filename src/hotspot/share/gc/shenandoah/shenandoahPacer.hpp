@@ -212,7 +212,7 @@ private:
   volatile intptr_t _budget;  // non-generational: similar to _incremental_allocation_budget.  could union with that.
   shenandoah_padding(1);
   // Allow these three variables to occupy the same cache line because we'll generally want their values together.
-  volatile intptr_t _incremental_phase_work_completed;   // Generational: increments of work that have been completed
+  volatile intptr_t _incremental_phase_work_completed;   // Generational: increments of work that have been completed, in bytes.
   volatile intptr_t _incremental_allocation_budget;      // Generational: how much memory can be allocated right now?
   volatile intptr_t _preauthorization_debt;              // Generational: debt to be paid on allocation preauthorizations
 
@@ -239,7 +239,7 @@ public:
           _epoch(0),
           _tax_rate(1),
           _budget(0),
-          _incremental_phase_work_completed(0),
+          _incremental_phase_work_completed(-1),
           _incremental_allocation_budget(0),
           _preauthorization_debt(0),
           _progress(PACING_PROGRESS_UNINIT) {
@@ -250,7 +250,7 @@ public:
 
   void setup_for_idle();
   void setup_for_mark();
-  void setup_for_evac();
+  void setup_for_evac(size_t immediate_trash_used, size_t evacuation_reserve);
   void setup_for_updaterefs();
 
   void setup_for_reset();
@@ -261,6 +261,9 @@ public:
 
   inline void report_alloc(size_t words);
 
+
+  // Return true iff we're close to overruning the current allocation budget.
+  bool is_generational_claim_at_risk(size_t words);
   void force_generational_claim_for_alloc(size_t words);
   bool claim_for_generational_alloc(size_t words);
   bool claim_for_alloc(size_t words, bool force);
@@ -280,6 +283,7 @@ private:
 #endif
   inline void report_internal(size_t words);
   inline void report_progress_internal(size_t words);
+  inline void report_generational_progress_internal(size_t words);
 
   inline void add_budget(size_t words);
   void restart_with(size_t non_taxable_bytes, double tax_rate);

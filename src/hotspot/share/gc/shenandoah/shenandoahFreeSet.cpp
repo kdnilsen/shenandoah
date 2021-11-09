@@ -332,9 +332,9 @@ HeapWord* ShenandoahFreeSet::try_allocate_in(ShenandoahHeapRegion* r, Shenandoah
         }
 #ifdef KELVIN_VERBOSE
         if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION) {
-          printf("try_allocate_in() YOUNG wastage of " SIZE_FORMAT " is reported as used\n", waste);
+          log_info(gc, ergo)("try_allocate_in() YOUNG wastage of " SIZE_FORMAT " is reported as used", waste);
         } else {
-          printf("try_allocate_in() OLD wastage of " SIZE_FORMAT " is reported as used\n", waste);
+          log_info(gc, ergo)("try_allocate_in() OLD wastage of " SIZE_FORMAT " is reported as used", waste);
         }
 #endif
         _heap->notify_mutator_alloc_words(waste >> LogHeapWordSize, true);
@@ -473,14 +473,14 @@ HeapWord* ShenandoahFreeSet::allocate_contiguous(ShenandoahAllocRequest& req) {
   if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION) {
     _heap->young_generation()->increase_used(words_size * HeapWordSize);
 #ifdef KELVIN_VERBOSE
-    printf("allocate_continuous() increasing young-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT "\n",
-           words_size * HeapWordSize, _heap->young_generation()->used());
+    log_info(gc, ergo)("allocate_continuous() increasing young-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT,
+                       words_size * HeapWordSize, _heap->young_generation()->used());
 #endif
   } else if (req.affiliation() == ShenandoahRegionAffiliation::OLD_GENERATION) {
     _heap->old_generation()->increase_used(words_size * HeapWordSize);
 #ifdef KELVIN_VERBOSE
-    printf("allocate_contiguous() increasing old-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT "\n",
-           words_size * HeapWordSize, _heap->old_generation()->used());
+    log_info(gc, ergo)("allocate_contiguous() increasing old-gen used by: " SIZE_FORMAT ", yielding: " SIZE_FORMAT,
+                       words_size * HeapWordSize, _heap->old_generation()->used());
 #endif
   }
 
@@ -495,9 +495,9 @@ HeapWord* ShenandoahFreeSet::allocate_contiguous(ShenandoahAllocRequest& req) {
     _heap->notify_mutator_alloc_words(waste, true);
 #ifdef KELVIN_VERBOSE
     if (req.affiliation() == ShenandoahRegionAffiliation::YOUNG_GENERATION)
-      printf("allocate_contiguous() YOUNG wastage of " SIZE_FORMAT " is reported as used\n", waste * HeapWordSize);
+      log_info(gc, ergo)("allocate_contiguous() YOUNG wastage of " SIZE_FORMAT " is reported as used", waste * HeapWordSize);
     else if (req.affiliation() == ShenandoahRegionAffiliation::OLD_GENERATION)
-      printf("allocate_contiguous() OLD wastage of " SIZE_FORMAT " is reported as used\n", waste * HeapWordSize);
+      log_info(gc, ergo)("allocate_contiguous() OLD wastage of " SIZE_FORMAT " is reported as used", waste * HeapWordSize);
 #endif
   }
 

@@ -52,12 +52,15 @@ void ShenandoahAggressiveHeuristics::choose_collection_set_from_regiondata(Shena
 
   // Note that there's no bound on collection set size.  If we try to collect too much memory, we'll get an alloc
   // failure during collection and we'll degenerate.
+  size_t live_bytes_in_collection_set = 0;
   for (size_t idx = 0; idx < size; idx++) {
     ShenandoahHeapRegion* r = data[idx]._region;
     if (r->garbage() > 0) {
       cset->add_region(r);
+      live_bytes_in_collection_set += r->get_live_data_bytes();
     }
   }
+  cset->reserve_bytes_for_evacuation(live_bytes_in_collection_set);
 }
 
 size_t ShenandoahAggressiveHeuristics::start_gc_threshold() {

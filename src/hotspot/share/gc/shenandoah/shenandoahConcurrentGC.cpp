@@ -787,7 +787,7 @@ void ShenandoahConcurrentGC::op_final_mark() {
       }
 
       if (ShenandoahPacing) {
-        heap->pacer()->setup_for_evac();
+        heap->pacer()->setup_for_evac(immediate_trash_used, evacuation_reserve);
       }
     } else {
       if (ShenandoahVerify) {
