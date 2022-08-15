@@ -334,6 +334,10 @@ void ShenandoahOldHeuristics::handle_promotion_failure() {
   _promotion_failed = true;
 }
 
+void ShenandoahOldHeuristics::record_full_cycle_start() {
+  _promotion_failed = false;
+}
+
 void ShenandoahOldHeuristics::record_cycle_start() {
   _promotion_failed = false;
   _trigger_heuristic->record_cycle_start();

@@ -110,6 +110,7 @@ void ShenandoahControlThread::run_service() {
   // degenerated cycle should be 'promoted' to a full cycle. The decision to
   // trigger a cycle or not is evaluated on the regulator thread.
   ShenandoahHeuristics* global_heuristics = heap->global_generation()->heuristics();
+  ShenandoahOldHeuristics* old_heuristics = heap->old_heuristics();
   while (!in_graceful_shutdown() && !should_terminate()) {
     // Figure out if we have pending requests.
     bool alloc_failure_pending = _alloc_failure_gc.is_set();
@@ -286,6 +287,10 @@ void ShenandoahControlThread::run_service() {
             break;
           }
           case stw_full: {
+            if (heap->mode()->is_generational()) {
+              // In case GC was triggered by promotion failure, inform old_heuristics that promotion failure is handled.
+              old_heuristics->record_full_cycle_start();
+            }
             service_stw_full_cycle(cause);
             break;
           }

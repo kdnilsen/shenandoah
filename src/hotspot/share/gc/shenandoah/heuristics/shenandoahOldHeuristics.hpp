@@ -131,6 +131,9 @@ public:
   // an old collection as soon as possible.
   void handle_promotion_failure();
 
+  // Notify heuristic that any promotion failures are being addressed, as we are about to perform full gc.
+  void record_full_cycle_start();
+
   virtual void record_cycle_start() override;
 
   virtual void record_cycle_end() override;
