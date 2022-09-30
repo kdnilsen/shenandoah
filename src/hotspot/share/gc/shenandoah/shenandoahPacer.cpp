@@ -34,7 +34,7 @@
 #include "runtime/mutexLocker.hpp"
 #include "runtime/threadSMR.hpp"
 
-#undef KELVIN_VERBOSE
+#define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
 size_t _pacer_total_mark = 0;
 size_t _pacer_total_evac = 0;
@@ -459,7 +459,6 @@ void ShenandoahPacer::setup_for_idle() {
       Atomic::store(&_incremental_phase_work_completed, 0L);
       Atomic::store(&_incremental_allocation_budget, (intptr_t) allocation_budget / 8);
 
-#define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
       printf("ShenandoahPacer::generational setup_for_idle concurrent marking, anticipated effort: " SIZE_FORMAT
              ", budget: " SIZE_FORMAT "\n", increment_effort, allocation_budget);
@@ -508,7 +507,6 @@ void ShenandoahPacer::setup_for_idle() {
       Atomic::store(&_preauthorization_debt, (intptr_t) allocation_budget / 8);
       Atomic::store(&_incremental_phase_work_completed, 0L);
       Atomic::store(&_incremental_allocation_budget, (intptr_t) allocation_budget / 8);
-#define KELVIN_VERBOSE
 #ifdef KELVIN_VERBOSE
       printf("ShenandoahPacer::generational setup_for_idle prep for mixed evacuations, anticipated effort: " SIZE_FORMAT ", budget: " SIZE_FORMAT "\n",
              increment_effort, allocation_budget);

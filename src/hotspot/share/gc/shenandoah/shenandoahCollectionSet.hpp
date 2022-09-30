@@ -104,10 +104,7 @@ public:
 
   // It is not known how many of these bytes will be promoted.
   inline size_t get_young_bytes_reserved_for_evacuation();
-  inline void reserve_young_bytes_for_evacuation(size_t byte_count);
-
   inline size_t get_old_bytes_reserved_for_evacuation();
-  inline void reserve_old_bytes_for_evacuation(size_t byte_count);
 
   inline size_t get_young_bytes_to_be_promoted();
 

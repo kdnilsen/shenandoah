@@ -152,7 +152,6 @@ void ShenandoahAdaptiveHeuristics::choose_collection_set_from_regiondata(Shenand
         }
         // Note that we do not add aged regions if they were not pre-selected.  The reason they were not preselected
         // is because there is not sufficient room in old-gen to hold their to-be-promoted live objects.
-
         if (add_region) {
           cset->add_region(r);
         }
@@ -201,7 +200,6 @@ void ShenandoahAdaptiveHeuristics::choose_collection_set_from_regiondata(Shenand
           }
           // Note that we do not add aged regions if they were not pre-selected.  The reason they were not preselected
           // is because there is not sufficient room in old-gen to hold their to-be-promoted live objects.
-
           if (add_region) {
             cset->add_region(r);
           }
@@ -227,13 +225,11 @@ void ShenandoahAdaptiveHeuristics::choose_collection_set_from_regiondata(Shenand
       bool add_regardless = (region_garbage > ignore_threshold) && (new_garbage < min_garbage);
       if ((new_cset <= max_cset) && (add_regardless || (region_garbage > garbage_threshold))) {
         cset->add_region(r);
-        live_bytes_in_collection_set += r->get_live_data_bytes();
         cur_cset = new_cset;
         cur_young_garbage = new_garbage;
       }
     }
   }
-  cset->reserve_bytes_for_evacuation(live_bytes_in_collection_set);
 }
 
 void ShenandoahAdaptiveHeuristics::record_cycle_start() {

@@ -787,6 +787,9 @@ void ShenandoahConcurrentGC::op_final_mark() {
       }
 
       if (ShenandoahPacing) {
+        ShenandoahCollectionSet* cset = heap->collection_set();
+        size_t immediate_trash_used = cset->get_immediate_trash();
+        size_t evacuation_reserve = cset->get_bytes_reserved_for_evacuation();
         heap->pacer()->setup_for_evac(immediate_trash_used, evacuation_reserve);
       }
     } else {
