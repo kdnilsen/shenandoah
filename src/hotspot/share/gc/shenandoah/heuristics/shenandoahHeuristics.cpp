@@ -39,7 +39,9 @@
 #include "logging/log.hpp"
 #include "logging/logTag.hpp"
 #include "runtime/globals_extension.hpp"
+#include "utilities/quickSort.hpp"
 
+// sort by decreasing garbage (so most garbage comes first)
 int ShenandoahHeuristics::compare_by_garbage(RegionData a, RegionData b) {
   if (a._garbage > b._garbage)
     return -1;
@@ -76,21 +78,58 @@ ShenandoahHeuristics::~ShenandoahHeuristics() {
   FREE_C_HEAP_ARRAY(RegionGarbage, _region_data);
 }
 
+typedef struct {
+  ShenandoahHeapRegion* _region;
+  size_t _live_data;
+} AgedRegionData;
+
+static int compare_by_aged_live(AgedRegionData a, AgedRegionData b) {
+  if (a._live_data < b._live_data)
+    return -1;
+  else if (a._live_data > b._live_data)
+    return 1;
+  else return 0;
+}
+
 size_t ShenandoahHeuristics::select_aged_regions(size_t old_available, size_t num_regions, bool* preselected_regions) {
   ShenandoahHeap* heap = ShenandoahHeap::heap();
+  size_t old_consumed = 0;
+  size_t candidates = 0;
+  size_t candidates_live = 0;
   assert(heap->mode()->is_generational(), "Only in generational mode");
 
-  size_t old_consumed = 0;
+  // Sort the promotion-eligible regions according to live-data-bytes so that we can first reclaim regions that require
+  // less evacuation effort.  This prioritizes garbage first, expanding the allocation pool before we begin the work of
+  // reclaiming regions that require more effort.
+  AgedRegionData* sorted_regions = (AgedRegionData*) alloca(num_regions * sizeof(AgedRegionData));
   for (size_t i = 0; i < num_regions; i++) {
-    ShenandoahHeapRegion* region = heap->get_region(i);
-    if (in_generation(region) && !region->is_empty() && region->is_regular() && (region->age() >= InitialTenuringThreshold)) {
-      size_t promotion_need = (size_t) (region->get_live_data_bytes() * ShenandoahEvacWaste);
-      if (old_consumed + promotion_need < old_available) {
+    ShenandoahHeapRegion* r = heap->get_region(i);
+    if (r->is_empty() || !r->has_live() || !r->is_young() || !r->is_regular()) {
+      continue;
+    }
+    if (r->age() >= InitialTenuringThreshold) {
+      size_t live_data = r->get_live_data_bytes();
+      candidates_live += live_data;
+      sorted_regions[candidates]._region = r;
+      sorted_regions[candidates++]._live_data = live_data;
+    }
+  }
+
+  // Sort in increasing order according to live data bytes.  Note that candidates represents the number of regions
+  // that qualify to be promoted by evacuation.
+  if (candidates > 0) {
+    QuickSort::sort<AgedRegionData>(sorted_regions, candidates, compare_by_aged_live, false);
+    for (size_t i = 0; i < candidates; i++) {
+      size_t region_live_data = sorted_regions[i]._live_data;
+      size_t promotion_need = (size_t) (region_live_data * ShenandoahPromoEvacWaste);
+      if (old_consumed + promotion_need <= old_available) {
+        ShenandoahHeapRegion* region = sorted_regions[i]._region;
         old_consumed += promotion_need;
-        preselected_regions[i] = true;
+        preselected_regions[region->index()] = true;
+      } else {
+        // There will be more work to do here when we merge in code for promoting in place and auto-sizing generations
+        break;
       }
-      // Note that we keep going even if one region is excluded from selection.
-      // Subsequent regions may be selected if they have smaller live data.
     }
   }
   return old_consumed;
@@ -99,6 +138,7 @@ size_t ShenandoahHeuristics::select_aged_regions(size_t old_available, size_t nu
 void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collection_set, ShenandoahOldHeuristics* old_heuristics) {
   ShenandoahHeap* heap = ShenandoahHeap::heap();
   bool is_generational = heap->mode()->is_generational();
+  size_t region_size_bytes = ShenandoahHeapRegion::region_size_bytes();
 
   assert(collection_set->count() == 0, "Must be empty");
   assert(!is_generational || !_generation->is_old(), "Old GC invokes ShenandoahOldHeuristics::choose_collection_set()");
@@ -113,6 +153,7 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
   RegionData* candidates = _region_data;
 
   size_t cand_idx = 0;
+  size_t preselected_candidates = 0;
 
   size_t total_garbage = 0;
 
@@ -132,7 +173,7 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
     total_garbage += garbage;
     if (region->is_empty()) {
       free_regions++;
-      free += ShenandoahHeapRegion::region_size_bytes();
+      free += region_size_bytes;
     } else if (region->is_regular()) {
       if (!region->has_live()) {
         // We can recycle it right away and put it in the free set.
@@ -141,14 +182,28 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
         region->make_trash_immediate();
       } else {
         assert(!_generation->is_old(), "OLD is handled elsewhere");
+        bool is_candidate;
         // This is our candidate for later consideration.
-        candidates[cand_idx]._region = region;
         if (is_generational && collection_set->is_preselected(i)) {
-          // If region is preselected, we know mode()->is_generational() and region->age() >= InitialTenuringThreshold)
-          garbage = ShenandoahHeapRegion::region_size_bytes();
+          // If !is_generational, we cannot ask if is_preselected.  If is_preselected, region->age() >= InitialTenuringThreshold).
+          is_candidate = true;
+          preselected_candidates++;
+          // Set garbage value to maximum value to force this into the sorted collection set.
+          garbage = region_size_bytes;
+        } else if (is_generational && region->is_young() && (region->age() >= InitialTenuringThreshold)) {
+          // Note that for GLOBAL GC, region may be OLD, and OLD regions do not qualify for pre-selection.
+
+          // This region is old enough to be promoted but it was not preselected because there is not sufficient room
+          // in old gen to hold the evacuated copies of this region's live data.  
+          is_candidate = false;
+        } else {
+          is_candidate = true;
         }
-        candidates[cand_idx]._garbage = garbage;
-        cand_idx++;
+        if (is_candidate) {
+          candidates[cand_idx]._region = region;
+          candidates[cand_idx]._garbage = garbage;
+          cand_idx++;
+        }
       }
     } else if (region->is_humongous_start()) {
 
@@ -185,7 +240,8 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
   size_t immediate_percent = (total_garbage == 0) ? 0 : (immediate_garbage * 100 / total_garbage);
   collection_set->set_immediate_trash(immediate_garbage);
 
-  if (immediate_percent <= ShenandoahImmediateThreshold) {
+  if ((preselected_candidates > 0) || (immediate_percent <= ShenandoahImmediateThreshold)) {
+    // We give priority to promoting memory even if we found enough immediate garbage to allow us to skip evac and update refs.
     if (old_heuristics != nullptr) {
       old_heuristics->prime_collection_set(collection_set);
     } else {
@@ -195,8 +251,7 @@ void ShenandoahHeuristics::choose_collection_set(ShenandoahCollectionSet* collec
     // Call the subclasses to add young-gen regions into the collection set.
     choose_collection_set_from_regiondata(collection_set, candidates, cand_idx, immediate_garbage + free);
   } else {
-    // We are going to skip evacuation and update refs because we reclaimed
-    // sufficient amounts of immediate garbage.
+    // We are going to skip evacuation and update refs because we reclaimed sufficient amounts of immediate garbage.
     heap->shenandoah_policy()->record_abbreviated_cycle();
   }
 

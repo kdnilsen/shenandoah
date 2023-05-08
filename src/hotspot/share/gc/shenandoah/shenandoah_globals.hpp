@@ -313,6 +313,14 @@
           "which upgrades to full GC whenever the budget is exceeded.")     \
           range(1.0,100.0)                                                  \
                                                                             \
+  product(double, ShenandoahPromoEvacWaste, 1.2, EXPERIMENTAL,              \
+          "How much waste promotions produce within the reserved space. "   \
+          "Larger values make evacuations more resilient against "          \
+          "evacuation conflicts, at expense of promoting less on each "     \
+          "GC cycle.  Smaller values increase the risk of evacuation "      \
+          "failures, which will trigger stop-the-world Full GC passes.")    \
+          range(1.0,100.0)                                                  \
+                                                                            \
   product(uintx, ShenandoahMaxEvacLABRatio, 0, EXPERIMENTAL,                \
           "Potentially, each running thread maintains a PLAB for "          \
           "evacuating objects into old-gen memory and a GCLAB for "         \
