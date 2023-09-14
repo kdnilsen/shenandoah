@@ -224,6 +224,8 @@ void ShenandoahGeneration::prepare_gc() {
   parallel_heap_region_iterate(&cl);
 }
 
+#undef KELVIN_DETAIL
+
 void ShenandoahGeneration::compute_evacuation_budgets(ShenandoahHeap* heap, bool* preselected_regions,
                                                       ShenandoahCollectionSet* collection_set,
                                                       size_t &consumed_by_advance_promotion) {
@@ -256,14 +258,26 @@ void ShenandoahGeneration::compute_evacuation_budgets(ShenandoahHeap* heap, bool
   // maximum_young_evacuation_reserve is upper bound on memory to be evacuated out of young
   size_t maximum_young_evacuation_reserve = (young_generation->max_capacity() * ShenandoahEvacReserve) / 100;
   size_t young_evacuation_reserve = maximum_young_evacuation_reserve;
+
+  ShenandoahFreeSet* free_sets = heap->free_set();
+  size_t total_young_available = free_sets->total_young_available();
+
   size_t excess_young;
-  if (young_generation->available() > young_evacuation_reserve) {
-    excess_young = young_generation->available() - young_evacuation_reserve;
+  if (total_young_available > young_evacuation_reserve) {
+    excess_young = total_young_available - young_evacuation_reserve;
   } else {
-    young_evacuation_reserve = young_generation->available();
+    young_evacuation_reserve = total_young_available;
     excess_young = 0;
   }
+#ifdef KELVIN_DETAIL
+  log_info(gc, ergo)("ceb(): max_young_evac_reserve: " SIZE_FORMAT ", young->avail() + collector_reserve: " SIZE_FORMAT
+                     ", young_evac_reserve: " SIZE_FORMAT ", excess_young: " SIZE_FORMAT,
+                     maximum_young_evacuation_reserve, total_young_available, young_evacuation_reserve, excess_young);
+#endif
   size_t unaffiliated_young = young_generation->free_unaffiliated_regions() * region_size_bytes;
+#ifdef KELVIN_DETAIL
+  log_info(gc, ergo)("unaffiliated young: " SIZE_FORMAT, unaffiliated_young);
+#endif
   if (excess_young > unaffiliated_young) {
     excess_young = unaffiliated_young;
   } else {
@@ -274,6 +288,9 @@ void ShenandoahGeneration::compute_evacuation_budgets(ShenandoahHeap* heap, bool
   // excess_young is available to be transferred to OLD.  Assume that OLD will not request any more than had
   // already been set aside for its promotion and evacuation needs at the end of previous GC.  No need to
   // hold back memory for allocation runway.
+#ifdef KELVIN_DETAIL
+  log_info(gc, ergo)("excess_young adjusted to: " SIZE_FORMAT, excess_young);
+#endif
 
   ShenandoahOldHeuristics* old_heuristics = heap->old_heuristics();
 
@@ -343,6 +360,10 @@ void ShenandoahGeneration::compute_evacuation_budgets(ShenandoahHeap* heap, bool
   collection_set->establish_preselected(preselected_regions);
   consumed_by_advance_promotion = select_aged_regions(old_promo_reserve, num_regions, preselected_regions);
   assert(consumed_by_advance_promotion <= maximum_old_evacuation_reserve, "Cannot promote more than available old-gen memory");
+#ifdef KELVIN_DETAIL
+  log_info(gc, ergo)("consumed_by_advance_promotion: " SIZE_FORMAT ", young_evac_reserve: " SIZE_FORMAT
+                     ", old_evac_reserve: " SIZE_FORMAT, consumed_by_advance_promotion, young_evacuation_reserve, old_evacuation_reserve);
+#endif
 
   // Note that unused old_promo_reserve might not be entirely consumed_by_advance_promotion.  Do not transfer this
   // to old_evacuation_reserve because this memory is likely very fragmented, and we do not want to increase the likelihood
@@ -406,7 +427,9 @@ void ShenandoahGeneration::adjust_evacuation_budgets(ShenandoahHeap* heap, Shena
   size_t young_evacuated = collection_set->get_young_bytes_reserved_for_evacuation();
   size_t young_evacuated_reserve_used = (size_t) (ShenandoahEvacWaste * young_evacuated);
 
-  assert(young_evacuated_reserve_used <= young_generation->available(), "Cannot evacuate more than is available in young");
+  size_t total_young_available = young_generation->available() + heap->free_set()->collector_available();
+
+  assert(young_evacuated_reserve_used <= total_young_available, "Cannot evacuate more than is available in young");
   heap->set_young_evac_reserve(young_evacuated_reserve_used);
 
   size_t old_available = old_generation->available();
@@ -722,12 +745,37 @@ void ShenandoahGeneration::prepare_regions_and_collection_set(bool concurrent) {
       // non-empty regions that are not selected as part of the collection set can be allocated by the mutator while
       // GC is evacuating and updating references.
 
+#ifdef KELVIN_DETAIL
+      if (!concurrent) {
+        log_info(gc, ergo)("About to compute evacuation budgets as part of degen gc");
+        heap->free_set()->log_status();
+      }
+#endif
       // Budgeting parameters to compute_evacuation_budgets are passed by reference.
       compute_evacuation_budgets(heap, preselected_regions, collection_set, consumed_by_advance_promotion);
+#ifdef KELVIN_DETAIL
+      if (!concurrent) {
+        log_info(gc, ergo)("After compute_evacuation_budgets() as part of degen gc");
+        heap->free_set()->log_status();
+      }
+#endif
       _heuristics->choose_collection_set(collection_set);
+#ifdef KELVIN_DETAIL
+      if (!concurrent) {
+        log_info(gc, ergo)("After choose_collection_set() in degen gc");
+        heap->free_set()->log_status();
+      }
+#endif
+
       if (!collection_set->is_empty()) {
         // only make use of evacuation budgets when we are evacuating
         adjust_evacuation_budgets(heap, collection_set, consumed_by_advance_promotion);
+#ifdef KELVIN_DETAIL
+      if (!concurrent) {
+        log_info(gc, ergo)("After adjust_evacuatioN_budgets() in degen gc");
+        heap->free_set()->log_status();
+      }
+#endif
       }
 
       if (is_global()) {

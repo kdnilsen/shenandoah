@@ -29,6 +29,10 @@
 #include "gc/shenandoah/shenandoahCollectorPolicy.hpp"
 #include "gc/shenandoah/shenandoahConcurrentMark.hpp"
 #include "gc/shenandoah/shenandoahDegeneratedGC.hpp"
+#undef KELVIN_DETAIL
+#ifdef KELVIN_DETAIL
+#include "gc/shenandoah/shenandoahFreeSet.hpp"
+#endif
 #include "gc/shenandoah/shenandoahFullGC.hpp"
 #include "gc/shenandoah/shenandoahGeneration.hpp"
 #include "gc/shenandoah/shenandoahHeap.inline.hpp"
@@ -187,6 +191,10 @@ void ShenandoahDegenGC::op_degenerated() {
       if (_degen_point == ShenandoahDegenPoint::_degenerated_mark &&
           heap->is_concurrent_mark_in_progress()) {
         op_finish_mark();
+#ifdef KELVIN_DETAIL
+        log_info(gc, ergo)("Back from op_finish_mark() on the way to degen gc");
+        heap->free_set()->log_status();
+#endif
       }
       assert(!heap->cancelled_gc(), "STW mark can not OOM");
 
@@ -377,6 +385,10 @@ void ShenandoahDegenGC::op_prepare_evacuation() {
   // STW cleanup weak roots and unload classes
   heap->parallel_cleaning(false /*full gc*/);
 
+#ifdef KELVIN_DETAIL
+  log_info(gc, ergo)("Heading to prepare_regions_and_collection_set as part of degen gc");
+  heap->free_set()->log_status();
+#endif
   // Prepare regions and collection set
   _generation->prepare_regions_and_collection_set(false /*concurrent*/);
 

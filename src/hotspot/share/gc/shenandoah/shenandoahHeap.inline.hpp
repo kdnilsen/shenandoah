@@ -828,6 +828,10 @@ inline size_t ShenandoahHeap::get_promoted_expended() {
 inline size_t ShenandoahHeap::set_young_evac_reserve(size_t new_val) {
   size_t orig = _young_evac_reserve;
   _young_evac_reserve = new_val;
+#undef KELVIN_OBSERVE
+#ifdef KELVIN_OBSERVE
+  log_info(gc, ergo)("set_young_evac_reserve(" SIZE_FORMAT "), previous value was " SIZE_FORMAT, new_val, orig);
+#endif
   return orig;
 }
 

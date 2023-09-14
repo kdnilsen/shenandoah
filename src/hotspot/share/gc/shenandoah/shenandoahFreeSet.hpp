@@ -214,6 +214,17 @@ public:
     return capacity() - used();
   }
 
+  inline size_t collector_capacity()  const { return _free_sets.capacity_of(Collector); }
+  inline size_t collector_used()      const { return _free_sets.used_by(Collector);     }
+  inline size_t collector_available() const {
+    assert(used() <= capacity(), "must use less than capacity");
+    return collector_capacity() - collector_used();
+  }
+
+  inline size_t total_young_available() const {
+    return available() + collector_available();
+  }
+
   HeapWord* allocate(ShenandoahAllocRequest& req, bool& in_new_region);
   size_t unsafe_peek_free() const;
 
