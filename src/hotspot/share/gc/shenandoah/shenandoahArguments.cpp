@@ -181,6 +181,14 @@ void ShenandoahArguments::initialize() {
   if (FLAG_IS_DEFAULT(TLABAllocationWeight)) {
     FLAG_SET_DEFAULT(TLABAllocationWeight, 90);
   }
+
+  if (ShenandoahPacing && ShenandoahThrottleAllocations) {
+    // User settings error, report and ask user to rectify.
+    vm_exit_during_initialization("Shenandoah expects at most one of ShenandoahPacing and ShenandoahThrottleAllocations");
+  } else if (ShenandoahThrottleAllocations && strcmp(ShenandoahGCMode, "generational")) {
+    // For isolation, though it would not be too difficult to make this work with single-generation mode also.
+    vm_exit_during_initializtion("ShenandoahThrottleAllocations only works in generational mode");
+  }
 }
 
 size_t ShenandoahArguments::conservative_max_heap_alignment() {

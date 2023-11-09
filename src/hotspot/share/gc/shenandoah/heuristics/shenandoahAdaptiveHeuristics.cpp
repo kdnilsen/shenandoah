@@ -205,6 +205,22 @@ static double saturate(double value, double min, double max) {
   return MAX2(MIN2(value, max), min);
 }
 
+size_t ShenandoahAdaptiveHeuristics::allocatable() {
+  ShenandoahHeap* heap = ShenandoahHeap::heap()->has_forwarded_objects();
+  size_t available = _space_info->soft_available();
+  if (heap->is_concurrent_young_mark_in_progress() || heap->is_evacuation_in_progress() || heap->is_update_refs_in_progress()) {
+    return available;
+  } else {
+    size_t capacity = _space_info->soft_max_capacity();
+    size_t spike_headroom = capacity / 100 * ShenandoahAllocSpikeFactor;
+    size_t penalties      = capacity / 100 * _gc_time_penalties;
+
+    available -= MIN2(available, spike_headroom);
+    available -= MIN2(available, penalties);
+    return available;
+  }
+}
+
 bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   size_t capacity = _space_info->soft_max_capacity();
   size_t available = _space_info->soft_available();

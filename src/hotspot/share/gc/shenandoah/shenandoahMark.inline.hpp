@@ -133,6 +133,11 @@ inline void ShenandoahMark::count_liveness(ShenandoahLiveData* live_data, oop ob
     if (new_val >= SHENANDOAH_LIVEDATA_MAX) {
       // overflow, flush to region data
       region->increase_live_data_gc_words(new_val);
+      if (ShenandoahPacing) {
+        heap->pacer()->report_mark(new_val);
+      } else if (ShenandoahThrottleAllocations) {
+        heap->throttler()->report_mark(new_val);
+      }
       live_data[region_idx] = 0;
     } else {
       // still good, remember in locals
@@ -143,11 +148,19 @@ inline void ShenandoahMark::count_liveness(ShenandoahLiveData* live_data, oop ob
     size_t num_regions = ShenandoahHeapRegion::required_regions(size * HeapWordSize);
 
     assert(region->is_affiliated(), "Do not count live data within FREE Humongous Start Region " SIZE_FORMAT, region_idx);
+    size_t humongous_words = 0;
     for (size_t i = region_idx; i < region_idx + num_regions; i++) {
       ShenandoahHeapRegion* chain_reg = heap->get_region(i);
       assert(chain_reg->is_humongous(), "Expecting a humongous region");
       assert(chain_reg->is_affiliated(), "Do not count live data within FREE Humongous Continuation Region " SIZE_FORMAT, i);
-      chain_reg->increase_live_data_gc_words(chain_reg->used() >> LogHeapWordSize);
+      size_t words_in_region = chain_reg->used() >> LogHeapWordSize;
+      chain_reg->increase_live_data_gc_words(words_in_region);
+      humongous_words += words_in_region;
+    }
+    if (ShenandoahPacing) {
+      heap->pacer()->report_mark(humongous_words);
+    } else if (ShenandoahThrottleAllocations) {
+      heap->throttler()->report_mark(humongous_words);
     }
   }
 }

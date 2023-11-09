@@ -49,6 +49,7 @@ private:
   size_t                _used;
   size_t                _live;
   size_t                _region_count;
+  size_t                _old_region_count;       // young_region_count is _region_count - _old_region_count
 
   size_t                _young_bytes_to_evacuate;
   size_t                _young_bytes_to_promote;
@@ -82,12 +83,16 @@ public:
   // Single-thread version
   ShenandoahHeapRegion* next();
 
-  size_t count()  const { return _region_count; }
-  bool is_empty() const { return _region_count == 0; }
+  size_t count()  const        { return _region_count; }
+  size_t young_count() const   { return _region_count - _old_region_count; }
+  size_t old_count() const     { return _old_region_count; }
 
-  void clear_current_index() {
-    _current_index = 0;
-  }
+  size_t young_bytes() const   { return _young_bytes_to_evacuate; }
+  size_t old_bytes() const     { return _old_bytes_to_evacuate; }
+
+  bool is_empty() const        { return _region_count == 0; }
+
+  void clear_current_index()   { _current_index = 0; }
 
   inline bool is_in(ShenandoahHeapRegion* r) const;
   inline bool is_in(size_t region_idx)       const;

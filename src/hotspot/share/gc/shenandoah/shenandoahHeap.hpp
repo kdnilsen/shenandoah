@@ -369,6 +369,9 @@ private:
   size_t _old_evac_reserve;            // Bytes reserved within old-gen to hold evacuated objects from old-gen collection set
   size_t _young_evac_reserve;          // Bytes reserved within young-gen to hold evacuated objects from young-gen collection set
 
+  size_t _promote_in_place_regions;    // Regions to be promoted in place
+  size_t _promote_in_place_bytes;      // Live bytes to be promoted in place
+
   bool _upgraded_to_full;
 
   ShenandoahAgeCensus* _age_census;    // Age census used for adapting tenuring threshold in generational mode
@@ -406,6 +409,14 @@ public:
   void set_concurrent_weak_root_in_progress(bool cond);
   void set_prepare_for_old_mark_in_progress(bool cond);
   void set_aging_cycle(bool cond);
+  void set_promote_in_place_load(size_t regions, size_t bytes);
+
+  size_t get_promote_in_place_regions() const;
+  size_t get_promote_in_place_bytes() const;
+  size_t get_young_bytes_to_evacuate() const;
+  size_t get_old_bytes_to_evacuate() const;
+  size_t get_young_bytes_not_evacuated() const;
+  size_t get_old_bytes_not_evauated() const;
 
   inline bool is_stable() const;
   inline bool is_idle() const;
@@ -535,6 +546,7 @@ private:
   ShenandoahMode*            _gc_mode;
   ShenandoahFreeSet*         _free_set;
   ShenandoahPacer*           _pacer;
+  ShenandoahThrottler*       _throttler;
   ShenandoahVerifier*        _verifier;
 
   ShenandoahPhaseTimings*       _phase_timings;

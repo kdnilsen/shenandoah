@@ -70,4 +70,73 @@ inline void ShenandoahPacer::add_budget(size_t words) {
   }
 }
 
+inline void ShenandoahThrottler::report_mark(size_t words) {
+  report_internal(words);
+#ifdef KELVIN_DEPRECATE
+  report_progress_internal(words);
+#endif
+}
+
+inline void ShenandoahThrottler::report_evac(size_t words) {
+  report_internal(words);
+}
+
+inline void ShenandoahThrottler::report_updaterefs(size_t words) {
+  report_internal(words);
+}
+
+inline void ShenandoahThrottler::report_alloc(size_t words) {
+  report_internal(words);
+}
+
+inline void ShenandoahThrottler::report_internal(size_t words) {
+  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
+  add_budget(words);
+}
+
+#ifdef KELVIN_DEPRECATE
+// ShenandoahPacer handled mark phase differently than other phases.
+// ShenandoahThrottler handls all the same.
+inline void ShenandoahThrottler::report_progress_internal(size_t words) {
+  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
+  STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
+  Atomic::add(&_progress, (intptr_t)words, memory_order_relaxed);
+}
+#endif
+
+inline void ShenandoahThrottler::add_budget(size_t words) {
+  STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
+  intptr_t inc = (intptr_t) words;
+
+  size_t orig_progress, new_progress;
+  do {
+    orig_progress = Atomic::load(&_progress);
+    new_progress = orig_progress + words;
+  } while (Atomic::cmpxchg(&_progress, orig_progress, new_progress, memory_order_relaxed) == orig_progress);
+
+  // Did I move progress across a budget threshold?  If so, augment the budget.
+  size_t supplement = 0;
+  for (int i = 0; i < BUDGET_SEGMENTS_PER_PHASE; i++) {
+    if ((orig_budget < work_completed[i]) && (new_progress > >= work_completed[i])) {
+      supplement += budget_supplement[i];
+    }
+  }
+  if (supplement > 0) {
+    size_t original_authorization, new_authorization;
+    do {
+      original_authorization = Atomic::load(&_authorized_allocations);
+      new_authorization = original_authorization + supplement;
+    } while (Atomic::cmpxchg(&_authorized_allocations,
+                             orig_authorizations, new_authorizations, memory_order_relaxed) == orig_authorizations);
+
+    size_t allocated = Atomic::load(&_allocated);
+    // Did I resolve a "deficit spending" situation?
+    // If so, there may be pending throtling claims that can now be satisfied.  Notify the waiters.
+    // Avoid taking any locks here, as this can be called from hot paths and/or while holding other locks.
+    if ((original_authorization <= allocated) && (new_authorization > _allocated)) {
+      _need_notify_waiters.try_set();
+    }
+  }
+}
+
 #endif // SHARE_GC_SHENANDOAH_SHENANDOAHPACER_INLINE_HPP

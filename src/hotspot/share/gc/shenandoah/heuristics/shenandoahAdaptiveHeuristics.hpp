@@ -80,6 +80,8 @@ public:
   void record_success_degenerated();
   void record_success_full();
 
+  size_t allocatable();
+
   virtual bool should_start_gc();
 
   virtual const char* name()     { return "Adaptive"; }

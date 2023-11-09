@@ -72,7 +72,7 @@ ShenandoahControlThread::ShenandoahControlThread() :
   reset_gc_id();
   create_and_start();
   _periodic_task.enroll();
-  if (ShenandoahPacing) {
+  if (ShenandoahPacing || ShenandoahThrottleAllocations) {
     _periodic_pacer_notify_task.enroll();
   }
 }
@@ -87,8 +87,11 @@ void ShenandoahPeriodicTask::task() {
 }
 
 void ShenandoahPeriodicPacerNotify::task() {
-  assert(ShenandoahPacing, "Should not be here otherwise");
-  ShenandoahHeap::heap()->pacer()->notify_waiters();
+  if (ShenandoahPacing) {
+    ShenandoahHeap::heap()->pacer()->notify_waiters();
+  } else if (ShenandoahThrottleAllocations) {
+    ShenandoahHeap::heap()->throttler()->notify_waiters();
+  }
 }
 
 void ShenandoahControlThread::run_service() {
@@ -370,6 +373,10 @@ void ShenandoahControlThread::run_service() {
       // GC is over, we are at idle now
       if (ShenandoahPacing) {
         heap->pacer()->setup_for_idle();
+      } else if (ShenandoahThrottleAllocations) {
+        assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+        size_t allocation_runway = ((ShenandoahAdaptiveDecay *) (heap->young_generation()->heuristics()))->get_available();
+        heap->throttler()->setup_for_idle(allocation_runway);
       }
     } else {
       // Allow allocators to know we have seen this much regions
@@ -419,6 +426,11 @@ void ShenandoahControlThread::process_phase_timings(const ShenandoahHeap* heap) 
   if (ShenandoahPacing) {
     heap->pacer()->flush_stats_to_cycle();
   }
+#ifdef KELVIN_DEPRECATE
+  else if (ShenandoahThrottleAllocations) {
+    heap->throttler()->flush_stats_to_cycle();
+  }
+#endif
 
   ShenandoahEvacuationTracker* evac_tracker = heap->evac_tracker();
   ShenandoahCycleStats         evac_stats   = evac_tracker->flush_cycle_to_global();
@@ -435,6 +447,11 @@ void ShenandoahControlThread::process_phase_timings(const ShenandoahHeap* heap) 
       if (ShenandoahPacing) {
         heap->pacer()->print_cycle_on(&ls);
       }
+#ifdef KELVIN_DEPRECATE
+      else if (ShenandoahThrottleAllocations) {
+        heap->throttler()->print_cycle_on(&ls);
+      }
+#endif
     }
   }
 
@@ -1056,7 +1073,7 @@ void ShenandoahControlThread::notify_heap_changed() {
 }
 
 void ShenandoahControlThread::pacing_notify_alloc(size_t words) {
-  assert(ShenandoahPacing, "should only call when pacing is enabled");
+  assert(ShenandoahPacing || ShenandoahThrottleAllocations, "should only call when pacing or throttling is enabled");
   Atomic::add(&_allocs_seen, words, memory_order_relaxed);
 }
 

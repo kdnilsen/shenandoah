@@ -453,7 +453,14 @@
                                                                             \
   product(bool, ShenandoahPacing, true, EXPERIMENTAL,                       \
           "Pace application allocations to give GC chance to start "        \
-          "and complete before allocation failure is reached.")             \
+          "and complete before allocation failure is reached.  Mutually "   \
+          "exclusive with ShenandoahThrottleAllocations.")                  \
+                                                                            \
+  product(bool, ShenandoahThrottleAllocations, false, EXPERIMENTAL,         \
+          "(Generational mode only) "                                       \
+          "Throttle application allocations to allow young GC phases to "   \
+          "complete before the supply of allocatable memory has been "      \
+          "exhausted.  Mutually exclusive with ShenandoahPacing.")          \
                                                                             \
   product(uintx, ShenandoahPacingMaxDelay, 10, EXPERIMENTAL,                \
           "Max delay for pacing application allocations. Larger values "    \
