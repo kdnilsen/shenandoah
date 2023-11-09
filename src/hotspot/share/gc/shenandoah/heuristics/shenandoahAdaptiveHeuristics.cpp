@@ -206,7 +206,7 @@ static double saturate(double value, double min, double max) {
 }
 
 size_t ShenandoahAdaptiveHeuristics::allocatable() {
-  ShenandoahHeap* heap = ShenandoahHeap::heap()->has_forwarded_objects();
+  ShenandoahHeap* heap = ShenandoahHeap::heap();
   size_t available = _space_info->soft_available();
   if (heap->is_concurrent_young_mark_in_progress() || heap->is_evacuation_in_progress() || heap->is_update_refs_in_progress()) {
     return available;

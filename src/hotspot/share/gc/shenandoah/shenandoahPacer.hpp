@@ -28,6 +28,7 @@
 #include "gc/shenandoah/shenandoahNumberSeq.hpp"
 #include "gc/shenandoah/shenandoahPadding.hpp"
 #include "gc/shenandoah/shenandoahSharedVariables.hpp"
+#include "gc/shenandoah/mode/shenandoahMode.hpp"
 #include "memory/allocation.hpp"
 
 class ShenandoahHeap;
@@ -211,30 +212,30 @@ class ShenandoahThrottler : public CHeapObj<mtGC> {
 public:
   // Assume evacuation requires four times the work of updating: Evacuation reads and writes every word.  Updateing only
   // reads and overwrites reference words that refer to the collection set after looking up the forewarding pointer.
-  const uint32 EVACUATE_VS_UPDATE_FACTOR = 4;
+  const uintx EVACUATE_VS_UPDATE_FACTOR = 4;
 
   // Assume evacuation requires sixteen times the work of promoting in place.  Promote in place only looks at headers of
   // marked objects, and writes new headers between each run of consecutive marked objects.
-  const uint32 PROMOTE_IN_PLACE_FACTOR = 16;
+  const uintx PROMOTE_IN_PLACE_FACTOR = 16;
 
   // Assume evacuation requires thirty two times the work of updating references within the remembered set.  Updating
   // within the rememberes set only has to deal with pointers that are within DIRTY ranges of the remembered set.
   // Much of the remembered set is not DIRTY and is not pointers.
-  const uint32 REMEMBERED_SET_UPDATE_FACTOR = 32; 
+  const uintx REMEMBERED_SET_UPDATE_FACTOR = 32; 
 
   // Maximum time to wait in a single throttle delay.  The throttling for any particular allocation request may
   // consit of multiple delays.  Increasing this value would result in a slower response to the eventual availability
   // of memory.  Decreasing this value would result in more operating system toil as a thread repeatedly sleeps and
   // wakes.
-  const uint32 MAX_THROTTLE_DELAY_MS = 8;
+  const uintx MAX_THROTTLE_DELAY_MS = 8;
 
   // Minimum time to wait in a single throttle delay.   When a thread finds that it cannot claim authorization for
   // a requested allocation, it first delays this amount.  If, after waiting, it still cannot claim authorization for
   // the allocation, it waits twice this amount, and so on, until the delay equals MAX_THROTTLE_DELAY_MS.  Thereafter,
   // it repeatedly waits MAX_THROTTLE_DELAY_MS until the allocation request can be granted.
-  const uint32 MAX_THROTTLE_DELAY_MS = 2;
+  const uintx MIN_THROTTLE_DELAY_MS = 2;
 
-  const uint32 BUDGET_SEGMENTS_PER_PHASE = 3;
+#define ShenandoahThrottleBudgetSegmentsPerPhase (3)
 
 private:
   ShenandoahHeap* _heap;
@@ -249,8 +250,8 @@ private:
   // Set once per phase
   volatile intptr_t _epoch;
   // _work_completed and _budget_supplement are both defined in terms of words of memory.
-  volatile size_t _work_completed[BUDGET_SEGMENTS_PER_PHASE];
-  volatile size_t _budget_supplement[BUDGET_SEGMENTS_PER_PHASE];
+  volatile intptr_t _work_completed[ShenandoahThrottleBudgetSegmentsPerPhase];
+  volatile size_t _budget_supplement[ShenandoahThrottleBudgetSegmentsPerPhase];
 
   // Set 4 times per phase (as quantums of work are completed)
   volatile size_t _authorized_allocations;
@@ -268,7 +269,7 @@ private:
   // Heavily updated, protect from accidental false sharing
   shenandoah_padding(0);
   // Words of memory allocated.
-  volatile intptr_t _allocated;
+  volatile size_t _allocated;
   shenandoah_padding(1);                // TODO: Is this redundant with shenandoah_padding(2), wasteful? no-op?
 
   // Heavily updated, protect from accidental false sharing
@@ -285,8 +286,7 @@ public:
           _phase_label(nullptr),
           _most_recent_live_words(0),
           _epoch(0),
-          _tax_rate(1),
-          _budget(0),
+          _authorized_allocations(0),
           _progress(PACING_PROGRESS_UNINIT) {}
 
   void setup_for_mark(size_t allocatable_words);
@@ -306,7 +306,7 @@ public:
   inline void report_alloc(size_t words);
 
   bool claim_for_alloc(size_t words, bool force);
-  void throttle_for_alloc(size_t words);
+  size_t throttle_for_alloc(ShenandoahAllocRequest req);
   void unthrottle_for_alloc(intptr_t epoch, size_t words);
 
   void notify_waiters();
@@ -319,7 +319,7 @@ public:
 private:
   void publish_metrics();
   void reset_metrics(const char* label);
-
+  void add_to_metrics(bool successful, size_t words, double delay);
 
   inline void report_internal(size_t words);
   inline void report_progress_internal(size_t words);
@@ -329,7 +329,7 @@ private:
 
 
   void wait(size_t time_ms);
-}
+};
 
 
 #endif // SHARE_GC_SHENANDOAH_SHENANDOAHPACER_HPP

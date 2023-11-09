@@ -187,7 +187,7 @@ void ShenandoahArguments::initialize() {
     vm_exit_during_initialization("Shenandoah expects at most one of ShenandoahPacing and ShenandoahThrottleAllocations");
   } else if (ShenandoahThrottleAllocations && strcmp(ShenandoahGCMode, "generational")) {
     // For isolation, though it would not be too difficult to make this work with single-generation mode also.
-    vm_exit_during_initializtion("ShenandoahThrottleAllocations only works in generational mode");
+    vm_exit_during_initialization("ShenandoahThrottleAllocations only works in generational mode");
   }
 }
 

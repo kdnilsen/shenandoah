@@ -106,7 +106,7 @@ void ShenandoahCollectionSet::add_region(ShenandoahHeapRegion* r) {
   }
 
   _region_count++;
-  if (r->is_old) {
+  if (r->is_old()) {
     _has_old_regions = true;
     _old_region_count++;
   }

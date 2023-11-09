@@ -46,6 +46,7 @@
 #include "gc/shenandoah/shenandoahUtils.hpp"
 #include "gc/shenandoah/shenandoahVMOperations.hpp"
 #include "gc/shenandoah/shenandoahWorkerPolicy.hpp"
+#include "gc/shenandoah/heuristics/shenandoahAdaptiveHeuristics.hpp"
 #include "gc/shenandoah/heuristics/shenandoahHeuristics.hpp"
 #include "gc/shenandoah/mode/shenandoahMode.hpp"
 #include "logging/log.hpp"
@@ -375,7 +376,7 @@ void ShenandoahControlThread::run_service() {
         heap->pacer()->setup_for_idle();
       } else if (ShenandoahThrottleAllocations) {
         assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
-        size_t allocation_runway = ((ShenandoahAdaptiveDecay *) (heap->young_generation()->heuristics()))->get_available();
+        size_t allocation_runway = ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable();
         heap->throttler()->setup_for_idle(allocation_runway);
       }
     } else {

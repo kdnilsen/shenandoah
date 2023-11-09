@@ -485,9 +485,10 @@ jint ShenandoahHeap::initialize() {
     _pacer = nullptr;
   }
   if (ShenandoahThrottleAllocations) {
-    assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+    assert(mode()->is_generational(), "Only generational mode supports throttling in current implementation");
     _throttler = new ShenandoahThrottler(this);
-    size_t allocation_runway = ((ShenandoahAdaptiveDecay *) (heap->young_generation()->heuristics()))->get_available();
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
     _throttler->setup_for_idle(allocation_runway);
   } else {
     _throttler = nullptr;
@@ -1341,19 +1342,29 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
   bool in_new_region = false;
   HeapWord* result = nullptr;
 
+  size_t min_size = req.is_lab_alloc()? req.min_size(): req.size();
+  ShenandoahAllocRequest surrogate = ShenandoahAllocRequest::for_tlab(min_size, min_size);
+  bool use_surrogate_req = false;
   if (req.is_mutator_alloc()) {
     if (ShenandoahPacing) {
       pacer()->pace_for_alloc(req.size());
       pacer_epoch = pacer()->epoch();
     } else if (ShenandoahThrottleAllocations) {
-      throttler()->throttle_for_alloc(req.size());
+      size_t authorized_size = throttler()->throttle_for_alloc(req);
       pacer_epoch = throttler()->epoch();
+      if (authorized_size < req.size()) {
+        use_surrogate_req = true;
+      }
     }
 
     if (!ShenandoahAllocFailureALot || !should_inject_alloc_failure()) {
-      result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      if (use_surrogate_req) {
+        result = allocate_memory_under_lock(surrogate, in_new_region, is_promotion);
+        req.set_actual_size(surrogate.actual_size());
+      } else {
+        result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      }
     }
-
 
     // Allocation failed, block until control thread reacted, then retry allocation.
     //
@@ -1366,9 +1377,13 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
     while (result == nullptr
         && (_progress_last_gc.is_set() || original_count == shenandoah_policy()->full_gc_count())) {
       control_thread()->handle_alloc_failure(req);
-      result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      if (use_surrogate_req) {
+        result = allocate_memory_under_lock(surrogate, in_new_region, is_promotion);
+        req.set_actual_size(surrogate.actual_size());
+      } else {
+        result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      }
     }
-
   } else {
     assert(req.is_gc_alloc(), "Can only accept GC allocs here");
     result = allocate_memory_under_lock(req, in_new_region, is_promotion);
@@ -1389,30 +1404,27 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
   // for any waste created by retiring regions with this request.
   increase_used(req);
 
-  if (result != nullptr) {
-    size_t requested = req.size();
-    size_t actual = req.actual_size();
+  size_t requested = use_surrogate_req? surrogate.size(): req.size();
+  size_t actual = req.actual_size();
 
-    assert (req.is_lab_alloc() || (requested == actual),
-            "Only LAB allocations are elastic: %s, requested = " SIZE_FORMAT ", actual = " SIZE_FORMAT,
-            ShenandoahAllocRequest::alloc_type_to_string(req.type()), requested, actual);
+  assert (req.is_lab_alloc() || (requested == actual),
+          "Only LAB allocations are elastic: %s, requested = " SIZE_FORMAT ", actual = " SIZE_FORMAT,
+          ShenandoahAllocRequest::alloc_type_to_string(req.type()), requested, actual);
 
-    if (req.is_mutator_alloc()) {
-      // If we requested more than we were granted, give the rest back to pacer.
-      // This only matters if we are in the same pacing epoch: do not try to unpace
-      // over the budget for the other phase.
-      if (ShenandoahPacing) {
-        if ((pacer_epoch > 0) && (requested > actual)) {
-          pacer()->unpace_for_alloc(pacer_epoch, requested - actual);
-        } else if (requested < actual) {
-          pacer()->claim_for_alloc(actual - requested, true);
-        }
-      } else if (ShenandoahThrottleAllocations) {
-        if ((pacer_epoch > 0) && (requested > actual)) {
-          throttler()->unthrottle_for_alloc(pacer_epoch, requested - actual);
-        } else if (requested < actual) {
-          throttler()->claim_for_alloc(actual - requested, true);
-        }
+  if (req.is_mutator_alloc()) {
+    // If we requested more than we were granted, including if we were granted nothing, give the rest back to pacer.
+    // This only matters if we are in the same pacing epoch. Do not try to unpace into the budget of a subsequent cycle.
+    if (ShenandoahPacing) {
+      if ((pacer_epoch > 0) && (requested > actual)) {
+        pacer()->unpace_for_alloc(pacer_epoch, requested - actual);
+      } else if (requested < actual) {
+        pacer()->claim_for_alloc(actual - requested, true);
+      }
+    } else if (ShenandoahThrottleAllocations) {
+      if ((pacer_epoch > 0) && (requested > actual)) {
+        throttler()->unthrottle_for_alloc(pacer_epoch, requested - actual);
+      } else if (requested < actual) {
+        throttler()->claim_for_alloc(actual - requested, true);
       }
     }
   }
@@ -1698,9 +1710,6 @@ private:
       assert(r->has_live(), "Region " SIZE_FORMAT " should have been reclaimed early", r->index());
 
       _sh->marked_object_iterate(r, &cl);
-
-      kelvin is here: need to add throttle reports for each of the pacer reports;
-      also need to implement the throttle reports in ShenandoahPacer.cpp
 
       if (ShenandoahPacing) {
         _sh->pacer()->report_evac(r->used() >> LogHeapWordSize);

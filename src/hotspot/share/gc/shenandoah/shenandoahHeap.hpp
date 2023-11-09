@@ -77,6 +77,7 @@ class ShenandoahMonitoringSupport;
 class ShenandoahMode;
 class ShenandoahPacer;
 class ShenandoahReferenceProcessor;
+class ShenandoahThrottler;
 class ShenandoahVerifier;
 class ShenandoahWorkerThreads;
 class VMStructs;
@@ -416,7 +417,7 @@ public:
   size_t get_young_bytes_to_evacuate() const;
   size_t get_old_bytes_to_evacuate() const;
   size_t get_young_bytes_not_evacuated() const;
-  size_t get_old_bytes_not_evauated() const;
+  size_t get_old_bytes_not_evacuated() const;
 
   inline bool is_stable() const;
   inline bool is_idle() const;
@@ -571,6 +572,7 @@ public:
   ShenandoahMode*            mode()              const { return _gc_mode;           }
   ShenandoahFreeSet*         free_set()          const { return _free_set;          }
   ShenandoahPacer*           pacer()             const { return _pacer;             }
+  ShenandoahThrottler*       throttler()         const { return _throttler;         }
 
   ShenandoahPhaseTimings*      phase_timings()   const { return _phase_timings;     }
   ShenandoahEvacuationTracker* evac_tracker()    const { return  _evac_tracker;     }

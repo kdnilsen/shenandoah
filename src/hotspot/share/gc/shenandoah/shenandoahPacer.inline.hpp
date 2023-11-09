@@ -108,17 +108,17 @@ inline void ShenandoahThrottler::add_budget(size_t words) {
   STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
   intptr_t inc = (intptr_t) words;
 
-  size_t orig_progress, new_progress;
+  intptr_t orig_progress, new_progress;
   do {
     orig_progress = Atomic::load(&_progress);
     new_progress = orig_progress + words;
-  } while (Atomic::cmpxchg(&_progress, orig_progress, new_progress, memory_order_relaxed) == orig_progress);
+  } while (Atomic::cmpxchg(&_progress, orig_progress, new_progress, memory_order_relaxed) != orig_progress);
 
   // Did I move progress across a budget threshold?  If so, augment the budget.
   size_t supplement = 0;
-  for (int i = 0; i < BUDGET_SEGMENTS_PER_PHASE; i++) {
-    if ((orig_budget < work_completed[i]) && (new_progress > >= work_completed[i])) {
-      supplement += budget_supplement[i];
+  for (uintx i = 0; i < ShenandoahThrottleBudgetSegmentsPerPhase; i++) {
+    if ((orig_progress < _work_completed[i]) && (new_progress >= _work_completed[i])) {
+      supplement += _budget_supplement[i];
     }
   }
   if (supplement > 0) {
@@ -127,13 +127,17 @@ inline void ShenandoahThrottler::add_budget(size_t words) {
       original_authorization = Atomic::load(&_authorized_allocations);
       new_authorization = original_authorization + supplement;
     } while (Atomic::cmpxchg(&_authorized_allocations,
-                             orig_authorizations, new_authorizations, memory_order_relaxed) == orig_authorizations);
-
+                             original_authorization, new_authorization, memory_order_relaxed) != original_authorization);
+#define KELVIN_MONITOR
+#ifdef KELVIN_MONITOR
+    log_info(gc, ergo)("Upon completion of work: " SIZE_FORMAT ", allocation budget is augmented by: " SIZE_FORMAT,
+                       new_progress, supplement);
+#endif
     size_t allocated = Atomic::load(&_allocated);
     // Did I resolve a "deficit spending" situation?
     // If so, there may be pending throtling claims that can now be satisfied.  Notify the waiters.
     // Avoid taking any locks here, as this can be called from hot paths and/or while holding other locks.
-    if ((original_authorization <= allocated) && (new_authorization > _allocated)) {
+    if ((original_authorization <= _allocated) && (new_authorization > _allocated)) {
       _need_notify_waiters.try_set();
     }
   }
