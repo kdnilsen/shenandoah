@@ -104,6 +104,10 @@ inline void ShenandoahThrottler::report_progress_internal(size_t words) {
 }
 #endif
 
+inline void ShenandoahThrottler::wake_throttled() {
+  _need_notify_waiters.try_set();
+}
+
 inline void ShenandoahThrottler::add_budget(size_t words) {
   STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
   intptr_t inc = (intptr_t) words;
@@ -135,10 +139,10 @@ inline void ShenandoahThrottler::add_budget(size_t words) {
 #endif
     size_t allocated = Atomic::load(&_allocated);
     // Did I resolve a "deficit spending" situation?
-    // If so, there may be pending throtling claims that can now be satisfied.  Notify the waiters.
+    // If so, there may be throttling threads whose requests that can now be satisfied.  Notify the waiters.
     // Avoid taking any locks here, as this can be called from hot paths and/or while holding other locks.
     if ((original_authorization <= _allocated) && (new_authorization > _allocated)) {
-      _need_notify_waiters.try_set();
+      wake_throttled();
     }
   }
 }

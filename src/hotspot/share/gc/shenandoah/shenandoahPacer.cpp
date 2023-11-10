@@ -340,6 +340,13 @@ void ShenandoahPacer::print_cycle_on(outputStream* out) {
   out->cr();
 }
 
+
+const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 4;
+const uintx ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR = 16;
+const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 32; 
+const uintx ShenandoahThrottler::MAX_THROTTLE_DELAY_MS = 128;
+const uintx ShenandoahThrottler::MIN_THROTTLE_DELAY_MS = 2;
+
 void ShenandoahThrottler::add_to_metrics(bool successful, size_t words, double delay) {
 
   size_t old_val, new_val;
@@ -421,12 +428,28 @@ void ShenandoahThrottler::reset_metrics(const char *label) {
 
 void ShenandoahThrottler::publish_metrics() {
   if (_phase_label != nullptr) {
-    log_info(gc)("Throttle report for %s:", _phase_label);
-    log_info(gc)("  throttled allocations: %8ld, total words throttled: %8ld, Total words failed to throttle: %8ld",
-                 _allocation_requests_throttled, _total_words_throttled, _total_words_failed_to_throttle);
-    log_info(gc)("    min throttled words: %8ld,   max throttled words: %8ld",
-                 _min_words_throttled_per_allocation, _max_words_throttled_per_allocation);
-    log_info(gc)("    max time in successful allocation: %12.6fs, max time in failed allocation: %12.6fs",
+    size_t bytes_allocated = _allocated << LogHeapWordSize;
+    size_t bytes_authorized = _authorized_allocations << LogHeapWordSize;
+    size_t progress_in_bytes = _progress << LogHeapWordSize;
+    log_info(gc)("Throttle report at end of %s:", _phase_label);
+    log_info(gc)("Allocated " SIZE_FORMAT "%s of authorized " SIZE_FORMAT "%s against progress: " SIZE_FORMAT "%s", 
+                 byte_size_in_proper_unit(bytes_allocated),    proper_unit_for_byte_size(bytes_allocated),
+                 byte_size_in_proper_unit(bytes_authorized),   proper_unit_for_byte_size(bytes_authorized),
+                 byte_size_in_proper_unit(progress_in_bytes),  proper_unit_for_byte_size(progress_in_bytes));
+    size_t bytes_throttled = _total_words_throttled << LogHeapWordSize;
+    log_info(gc)("  throttled allocations: %8ld, total bytes throttled: %8ld%s",
+                 _allocation_requests_throttled,
+                 byte_size_in_proper_unit(bytes_throttled), proper_unit_for_byte_size(bytes_throttled));
+    size_t min_bytes_throttled =
+      (_min_words_throttled_per_allocation == SIZE_MAX)? 0: _min_words_throttled_per_allocation << LogHeapWordSize;
+    size_t max_bytes_throttled = _max_words_throttled_per_allocation << LogHeapWordSize;
+    log_info(gc)("    min throttled bytes: %8ld%s,   max throttled bytes: %8ld%s",
+                 byte_size_in_proper_unit(min_bytes_throttled), proper_unit_for_byte_size(min_bytes_throttled),
+                 byte_size_in_proper_unit(max_bytes_throttled), proper_unit_for_byte_size(max_bytes_throttled));
+    size_t bytes_failed_to_throttle = _total_words_failed_to_throttle << LogHeapWordSize;
+    log_info(gc)("  Total bytes that failed to throttle: %8ld%s",
+                 byte_size_in_proper_unit(bytes_failed_to_throttle), proper_unit_for_byte_size(bytes_failed_to_throttle));
+    log_info(gc)("    max time in successful allocation: %12.6fs, in failed allocation: %12.6fs",
                  _max_time_throttled_per_successful_allocation, _max_time_throttled_per_failed_allocation);
     log_info(gc)("                  total throttle time: %12.6fs", _total_time_in_throttle);
   }
@@ -488,11 +511,12 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable) {
   Atomic::store(&_allocated, (size_t) 0L);
   Atomic::store(&_progress, (intptr_t) 0L);
   reset_metrics("Mark");
+  wake_throttled();
 
   size_t expected_live = projected_work << LogHeapWordSize;
   size_t phase_budget_bytes = phase_budget << LogHeapWordSize;
   size_t bytes_authorized = initial_budget << LogHeapWordSize;
-  log_info(gc, ergo)("Throttle Parameters for Marking of " SIZE_FORMAT "%s bytes, Phase Budget: " SIZE_FORMAT "%s, "
+  log_info(gc, ergo)("Throttle Marking of " SIZE_FORMAT "%s bytes, Phase Budget: " SIZE_FORMAT "%s, "
                      "immediate authorization: " SIZE_FORMAT "%s",
                      byte_size_in_proper_unit(expected_live),       proper_unit_for_byte_size(expected_live),
                      byte_size_in_proper_unit(phase_budget_bytes),  proper_unit_for_byte_size(phase_budget_bytes),
@@ -507,7 +531,7 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable) {
 }
 
 void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words,
-                                         size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_evacuation) {
+                                         size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_or_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
   publish_metrics();
 
@@ -516,7 +540,7 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
 
   size_t evac_cost = evac_words + promo_in_place_words / PROMOTE_IN_PLACE_FACTOR;
   size_t update_cost;
-  if (is_mixed_evacuation) {
+  if (is_mixed_or_global) {
     update_cost = (uncollected_young_words + uncollected_old_words) / EVACUATE_VS_UPDATE_FACTOR;
   } else {
     update_cost = ((uncollected_young_words - promo_in_place_words) / EVACUATE_VS_UPDATE_FACTOR +
@@ -524,7 +548,7 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
   }
   
   double evac_fraction_of_total = ((double) evac_cost) / (evac_cost + update_cost);
-  size_t projected_work = (size_t) (evac_cost * evac_fraction_of_total);
+  size_t projected_work = (size_t) evac_cost;
   size_t phase_budget = (size_t) (allocatable_words * evac_fraction_of_total);
 
   assert(ShenandoahThrottleBudgetSegmentsPerPhase == 3, "Otherwise, the initializations that follow are not correct.");
@@ -543,12 +567,14 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
   Atomic::store(&_allocated, (size_t) 0);
   Atomic::store(&_progress, (intptr_t) 0);
   reset_metrics("Evacuation");
+  wake_throttled();
 
   size_t bytes_to_evac = projected_work << LogHeapWordSize;
   size_t phase_budget_bytes = phase_budget << LogHeapWordSize;
   size_t bytes_authorized = initial_budget << LogHeapWordSize;
-  log_info(gc, ergo)("Throttle Parameters for Evacuation of " SIZE_FORMAT "%s bytes, Phase Budget: " SIZE_FORMAT "%s, "
+  log_info(gc, ergo)("Throttle Evacuation (%s) of " SIZE_FORMAT "%s bytes, Phase Budget: " SIZE_FORMAT "%s, "
                      "immediate authorization: " SIZE_FORMAT "%s",
+                     is_mixed_or_global? "mixed or global evacuation ": "young",
                      byte_size_in_proper_unit(bytes_to_evac),       proper_unit_for_byte_size(bytes_to_evac),
                      byte_size_in_proper_unit(phase_budget_bytes),  proper_unit_for_byte_size(phase_budget_bytes),
                      byte_size_in_proper_unit(bytes_authorized),    proper_unit_for_byte_size(bytes_authorized));
@@ -563,12 +589,12 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
 
 void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t promo_in_place_words,
                                                size_t uncollected_young_words, size_t uncollected_old_words,
-                                               bool is_mixed_evacuation) {
+                                               bool is_mixed_or_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
   publish_metrics();
 
   size_t update_cost;
-  if (is_mixed_evacuation) {
+  if (is_mixed_or_global) {
     update_cost = (uncollected_young_words + uncollected_old_words) / EVACUATE_VS_UPDATE_FACTOR;
   } else {
     update_cost = ((uncollected_young_words - promo_in_place_words) / EVACUATE_VS_UPDATE_FACTOR +
@@ -594,20 +620,21 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
   Atomic::store(&_allocated, (size_t) 0);
   Atomic::store(&_progress, (intptr_t) 0);
   reset_metrics("Update References");
+  wake_throttled();
 
   size_t young_bytes = (uncollected_young_words - promo_in_place_words) << LogHeapWordSize;
   size_t old_bytes = (uncollected_old_words + promo_in_place_words) << LogHeapWordSize;
   size_t phase_budget_bytes = phase_budget << LogHeapWordSize;
   size_t bytes_authorized = initial_budget << LogHeapWordSize;
-  log_info(gc, ergo)("Throttle Parameters for (%s cycle) Updating Refs in "
+  log_info(gc, ergo)("Throttle (%s cycle) Updating Refs in "
                      "Uncollected Young: " SIZE_FORMAT "%s, "
                      "Uncollected Old: " SIZE_FORMAT "%s, "
                      "Phase Budget: " SIZE_FORMAT "%s, immediate authorization: " SIZE_FORMAT "%s",
-                     is_mixed_evacuation? "mixed evacuation ": "young",
+                     is_mixed_or_global? "mixed or global evacuation ": "young",
                      byte_size_in_proper_unit(young_bytes),         proper_unit_for_byte_size(young_bytes),
                      byte_size_in_proper_unit(old_bytes),           proper_unit_for_byte_size(old_bytes),
                      byte_size_in_proper_unit(phase_budget_bytes),  proper_unit_for_byte_size(phase_budget_bytes),
-                     byte_size_in_proper_unit(initial_budget),      proper_unit_for_byte_size(initial_budget));
+                     byte_size_in_proper_unit(bytes_authorized),    proper_unit_for_byte_size(bytes_authorized));
 
   for (int i = 0; i < ShenandoahThrottleBudgetSegmentsPerPhase; i++) {
     size_t byte_budget = _budget_supplement[i] << LogHeapWordSize;
@@ -640,13 +667,14 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
   _budget_supplement[1] = (size_t) 0;
   _budget_supplement[2] = (size_t) 0;
   reset_metrics("Idle");
+  wake_throttled();
 
   Atomic::store(&_authorized_allocations, allocatable_words);
   Atomic::store(&_allocated, (size_t) 0);
   Atomic::store(&_progress, (intptr_t) 0);
 
   size_t bytes_authorized = allocatable_words << LogHeapWordSize;
-  log_info(gc, ergo)("Throttle Parameters for Idle. Phase Budget: " SIZE_FORMAT "%s (all authorized now)",
+  log_info(gc, ergo)("Throttle Idle. Phase Budget: " SIZE_FORMAT "%s (all authorized now)",
                      byte_size_in_proper_unit(bytes_authorized),      proper_unit_for_byte_size(bytes_authorized));
   /*
    * No value in dumping supplementals.
@@ -677,9 +705,10 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   Atomic::store(&_allocated, (size_t) 0);
   Atomic::store(&_progress, (intptr_t) 0);
   reset_metrics("Reset");
-  
+  wake_throttled();
+
   size_t bytes_authorized = allocatable_words << LogHeapWordSize;
-  log_info(gc, ergo)("Throttle Parameters for Reset. Phase Budget: " SIZE_FORMAT "%s (all authorized now)",
+  log_info(gc, ergo)("Throttle Reset. Phase Budget: " SIZE_FORMAT "%s (all authorized now)",
                      byte_size_in_proper_unit(bytes_authorized),    proper_unit_for_byte_size(bytes_authorized));
   /*
    * No value in dumping supplementals.
@@ -744,6 +773,14 @@ void ShenandoahThrottler::unthrottle_for_alloc(intptr_t epoch, size_t words) {
     assert(old_val > words, "cannot unthrottle more than has been allocated");
     new_val = old_val - words;
   } while (Atomic::cmpxchg(&_allocated, old_val, new_val, memory_order_relaxed) != old_val);
+
+  // Did I resolve a "deficit spending" situation?
+  // If so, there may be throttling threads whose requests that can now be satisfied.  Notify the waiters.
+  // Avoid taking any locks here, as this can be called from hot paths and/or while holding other locks.
+  size_t authorization = Atomic::load(&_authorized_allocations);
+  if ((old_val >= authorization) && (new_val < authorization)) {
+    wake_throttled();
+  }
 }
 
 intptr_t ShenandoahThrottler::epoch() {

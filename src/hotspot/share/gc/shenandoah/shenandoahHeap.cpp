@@ -2938,7 +2938,8 @@ private:
         if (ShenandoahPacing) {
           _heap->pacer()->report_updaterefs(pointer_delta(update_watermark, r->bottom()));
         } else if (ShenandoahThrottleAllocations) {
-          _heap->throttler()->report_updaterefs(pointer_delta(update_watermark, r->bottom()));
+          _heap->throttler()->report_updaterefs(pointer_delta(update_watermark, r->bottom())
+                                                / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
         }
       }
       if (_heap->check_cancelled_gc_and_yield(CONCURRENT)) {
@@ -3057,7 +3058,8 @@ private:
           if (ShenandoahPacing && (start_of_range < end_of_range)) {
             _heap->pacer()->report_updaterefs(pointer_delta(end_of_range, start_of_range));
           } else if (ShenandoahThrottleAllocations && (start_of_range < end_of_range)) {
-            _heap->throttler()->report_updaterefs(pointer_delta(end_of_range, start_of_range));
+            _heap->throttler()->report_updaterefs(pointer_delta(end_of_range, start_of_range)
+                                                  / ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR);
           }
         }
       }

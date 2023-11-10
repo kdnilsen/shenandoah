@@ -592,7 +592,8 @@ void ShenandoahConcurrentGC::op_reset() {
     heap->pacer()->setup_for_reset();
   } else if (ShenandoahThrottleAllocations) {
     assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
-    size_t allocation_runway = ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable();
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
     heap->throttler()->setup_for_reset(allocation_runway);
   }
   _generation->prepare_gc();
@@ -808,12 +809,13 @@ void ShenandoahConcurrentGC::op_final_mark() {
           assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
           size_t allocation_runway = 
             ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
-          size_t evac_words = heap->get_young_bytes_to_evacuate() + heap->get_old_bytes_to_evacuate();
+          size_t evac_words = (heap->get_young_bytes_to_evacuate() + heap->get_old_bytes_to_evacuate()) >> LogHeapWordSize;
           size_t promo_in_place_words = heap->get_promote_in_place_bytes() >> LogHeapWordSize;
           size_t young_words_not_evacuated = heap->get_young_bytes_not_evacuated() >> LogHeapWordSize;
           size_t old_words_not_evacuated = heap->get_old_bytes_not_evacuated() >> LogHeapWordSize;
+          bool is_mixed_or_global = heap->doing_mixed_evacuations() || _generation->is_global();
           heap->throttler()->setup_for_evac(allocation_runway, evac_words, promo_in_place_words, young_words_not_evacuated,
-                                            old_words_not_evacuated, heap->doing_mixed_evacuations());
+                                            old_words_not_evacuated, is_mixed_or_global);
         }
       } else {
         if (ShenandoahVerify) {
@@ -1201,8 +1203,9 @@ void ShenandoahConcurrentGC::op_init_updaterefs() {
     size_t promo_in_place_words = heap->get_promote_in_place_bytes() >> LogHeapWordSize;
     size_t young_words_not_evacuated = heap->get_young_bytes_not_evacuated() >> LogHeapWordSize;
     size_t old_words_not_evacuated = heap->get_old_bytes_not_evacuated() >> LogHeapWordSize;
+    bool is_mixed_or_global = heap->doing_mixed_evacuations() || _generation->is_global();
     heap->throttler()->setup_for_updaterefs(allocation_runway, promo_in_place_words,
-                                            young_words_not_evacuated, old_words_not_evacuated, heap->doing_mixed_evacuations());
+                                            young_words_not_evacuated, old_words_not_evacuated, is_mixed_or_global);
   }
 }
 

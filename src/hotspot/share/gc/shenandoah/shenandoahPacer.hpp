@@ -212,30 +212,31 @@ class ShenandoahThrottler : public CHeapObj<mtGC> {
 public:
   // Assume evacuation requires four times the work of updating: Evacuation reads and writes every word.  Updateing only
   // reads and overwrites reference words that refer to the collection set after looking up the forewarding pointer.
-  const uintx EVACUATE_VS_UPDATE_FACTOR = 4;
+  static const uintx EVACUATE_VS_UPDATE_FACTOR;
 
   // Assume evacuation requires sixteen times the work of promoting in place.  Promote in place only looks at headers of
   // marked objects, and writes new headers between each run of consecutive marked objects.
-  const uintx PROMOTE_IN_PLACE_FACTOR = 16;
+  static const uintx PROMOTE_IN_PLACE_FACTOR;
 
   // Assume evacuation requires thirty two times the work of updating references within the remembered set.  Updating
   // within the rememberes set only has to deal with pointers that are within DIRTY ranges of the remembered set.
   // Much of the remembered set is not DIRTY and is not pointers.
-  const uintx REMEMBERED_SET_UPDATE_FACTOR = 32; 
+  static const uintx REMEMBERED_SET_UPDATE_FACTOR;
 
   // Maximum time to wait in a single throttle delay.  The throttling for any particular allocation request may
-  // consit of multiple delays.  Increasing this value would result in a slower response to the eventual availability
+  // consist of multiple delays.  Increasing this value would result in a slower response to the eventual availability
   // of memory.  Decreasing this value would result in more operating system toil as a thread repeatedly sleeps and
-  // wakes.
-  const uintx MAX_THROTTLE_DELAY_MS = 8;
+  // wakes.  Note that a thread waiting in a throttle delay will be notified when additional memory becomes available.
+  static const uintx MAX_THROTTLE_DELAY_MS;
 
   // Minimum time to wait in a single throttle delay.   When a thread finds that it cannot claim authorization for
   // a requested allocation, it first delays this amount.  If, after waiting, it still cannot claim authorization for
   // the allocation, it waits twice this amount, and so on, until the delay equals MAX_THROTTLE_DELAY_MS.  Thereafter,
   // it repeatedly waits MAX_THROTTLE_DELAY_MS until the allocation request can be granted.
-  const uintx MIN_THROTTLE_DELAY_MS = 2;
+  static const uintx MIN_THROTTLE_DELAY_MS;
 
 #define ShenandoahThrottleBudgetSegmentsPerPhase (3)
+
 
 private:
   ShenandoahHeap* _heap;
@@ -291,9 +292,9 @@ public:
 
   void setup_for_mark(size_t allocatable_words);
   void setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words,
-                      size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_evacuation);
+                      size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_or_global);
   void setup_for_updaterefs(size_t allocatable_words, size_t promo_in_place_words,
-                            size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_evacuation);
+                            size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_or_global);
 
   // Not sure if I want to treat idle, reset as separate phases
   void setup_for_idle(size_t allocatable_words);
@@ -323,6 +324,8 @@ private:
 
   inline void report_internal(size_t words);
   inline void report_progress_internal(size_t words);
+
+  inline void wake_throttled();
 
   inline void add_budget(size_t words);
   void restart_with(size_t non_taxable_bytes, double tax_rate);

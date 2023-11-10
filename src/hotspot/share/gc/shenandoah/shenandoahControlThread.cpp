@@ -376,7 +376,8 @@ void ShenandoahControlThread::run_service() {
         heap->pacer()->setup_for_idle();
       } else if (ShenandoahThrottleAllocations) {
         assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
-        size_t allocation_runway = ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable();
+        size_t allocation_runway =
+          ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
         heap->throttler()->setup_for_idle(allocation_runway);
       }
     } else {
