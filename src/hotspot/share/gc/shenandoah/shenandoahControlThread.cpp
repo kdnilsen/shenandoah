@@ -378,7 +378,11 @@ void ShenandoahControlThread::run_service() {
         assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
         size_t allocation_runway =
           ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
-        heap->throttler()->setup_for_idle(allocation_runway);
+        // We double the allocation runway for idle because we do not want any throttling during idle spans.
+        // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
+        // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
+        // not trigger the next GC because it prevents allocation pool from being depleted.
+        heap->throttler()->setup_for_idle(allocation_runway * 2);
       }
     } else {
       // Allow allocators to know we have seen this much regions
@@ -767,6 +771,18 @@ void ShenandoahControlThread::service_concurrent_cycle(ShenandoahHeap* heap,
                                  "At end of GC";
   }
   heap->log_heap_status(msg);
+  if (generation->is_young() && !heap->cancelled_gc() && do_old_gc_bootstrap) {
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+    // We're about to start up concurrent old marking. This counts as idle time insofar as young-gen triggering
+    // heuristics are concerned.
+    //
+    // We double the allocation runway for idle because we do not want any throttling during idle spans.
+    // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
+    // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
+    // not trigger the next GC because it prevents allocation pool from being depleted.
+    heap->throttler()->setup_for_idle(allocation_runway * 2);
+  }
 }
 
 bool ShenandoahControlThread::check_cancellation_or_degen(ShenandoahGC::ShenandoahDegenPoint point) {

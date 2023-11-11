@@ -126,24 +126,20 @@ inline void ShenandoahThrottler::add_budget(size_t words) {
     }
   }
   if (supplement > 0) {
-    size_t original_authorization, new_authorization;
+    intptr_t original_budget, new_budget;
     do {
-      original_authorization = Atomic::load(&_authorized_allocations);
-      new_authorization = original_authorization + supplement;
-    } while (Atomic::cmpxchg(&_authorized_allocations,
-                             original_authorization, new_authorization, memory_order_relaxed) != original_authorization);
+      original_budget = Atomic::load(&_available_words);
+      new_budget = original_budget + supplement;
+    } while (Atomic::cmpxchg(&_available_words, original_budget, new_budget, memory_order_relaxed) != original_budget);
 #define KELVIN_MONITOR
 #ifdef KELVIN_MONITOR
     log_info(gc, ergo)("Upon completion of work: " SIZE_FORMAT ", allocation budget is augmented by: " SIZE_FORMAT,
                        new_progress, supplement);
 #endif
-    size_t allocated = Atomic::load(&_allocated);
-    // Did I resolve a "deficit spending" situation?
-    // If so, there may be throttling threads whose requests that can now be satisfied.  Notify the waiters.
-    // Avoid taking any locks here, as this can be called from hot paths and/or while holding other locks.
-    if ((original_authorization <= _allocated) && (new_authorization > _allocated)) {
-      wake_throttled();
-    }
+    // Notify unconditionally.  Don't second guess whether there are threads waiting in throttling requests. Threads
+    // can be waiting even if original_budget was > 0 because very large requests may be forced to delay even when
+    // budget is sufficient and smaller requests will delay if budget is positive but insufficient.
+    wake_throttled();
   }
 }
 

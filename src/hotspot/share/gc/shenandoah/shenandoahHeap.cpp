@@ -489,7 +489,11 @@ jint ShenandoahHeap::initialize() {
     _throttler = new ShenandoahThrottler(this);
     size_t allocation_runway =
       ((ShenandoahAdaptiveHeuristics *) (young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
-    _throttler->setup_for_idle(allocation_runway);
+        // We double the allocation runway for idle because we do not want any throttling during idle spans.
+        // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
+        // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
+        // not trigger the next GC because it prevents allocation pool from being depleted.
+    _throttler->setup_for_idle(allocation_runway * 2);
   } else {
     _throttler = nullptr;
   }
@@ -1714,7 +1718,12 @@ private:
       if (ShenandoahPacing) {
         _sh->pacer()->report_evac(r->used() >> LogHeapWordSize);
       } else if (ShenandoahThrottleAllocations) {
-        _sh->throttler()->report_evac(r->used() >> LogHeapWordSize);
+#define KELVIN_EVAC
+#ifdef KELVIN_EVAC
+        log_info(gc)("report_evac in ShenEvacTask::do_work(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
+                     r->index(), r->get_live_data_words());
+#endif
+        _sh->throttler()->report_evac(r->get_live_data_words());
       }
       if (_sh->check_cancelled_gc_and_yield(_concurrent)) {
         break;
@@ -1780,7 +1789,12 @@ private:
         if (ShenandoahPacing) {
           _sh->pacer()->report_evac(r->used() >> LogHeapWordSize);
         } else if (ShenandoahThrottleAllocations) {
-          _sh->throttler()->report_evac(r->used() >> LogHeapWordSize);
+#define KELVIN_EVAC
+#ifdef KELVIN_EVAC
+          log_info(gc)("report_evac in ShenGenEvacTask::do_work(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
+                       r->index(), r->get_live_data_words());
+#endif
+          _sh->throttler()->report_evac(r->get_live_data_words());
         }
       } else if (r->is_young() && r->is_active() && (r->age() >= _tenuring_threshold)) {
         HeapWord* tams = ctx->top_at_mark_start(r);
@@ -2938,8 +2952,15 @@ private:
         if (ShenandoahPacing) {
           _heap->pacer()->report_updaterefs(pointer_delta(update_watermark, r->bottom()));
         } else if (ShenandoahThrottleAllocations) {
-          _heap->throttler()->report_updaterefs(pointer_delta(update_watermark, r->bottom())
-                                                / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
+#define KELVIN_UPDATE
+#ifdef KELVIN_UPDATE
+          log_info(gc)("report_updaterefs in ShenUpdateHeapRefsTask::do_work(young or global region: " SIZE_FORMAT
+                       "): progress is: " SIZE_FORMAT,
+                       r->index(), (r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
+#endif
+          // We claim credit for all of used even though we only updated through update_watermark.  When we budgeted,
+          // we did know the update_watermark for each region to be updated.
+          _heap->throttler()->report_updaterefs((r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
         }
       }
       if (_heap->check_cancelled_gc_and_yield(CONCURRENT)) {
@@ -3058,6 +3079,15 @@ private:
           if (ShenandoahPacing && (start_of_range < end_of_range)) {
             _heap->pacer()->report_updaterefs(pointer_delta(end_of_range, start_of_range));
           } else if (ShenandoahThrottleAllocations && (start_of_range < end_of_range)) {
+#define KELVIN_UPDATE
+#ifdef KELVIN_UPDATE
+            // We'll scan the remembered set of this region one slice at a time.  The sum of slices should represent
+            // used for the region.
+            log_info(gc)("report_updaterefs in ShenUpdateHeapRefsTask::do_work(old remset region: " SIZE_FORMAT
+                         " slice[" SIZE_FORMAT " .. " SIZE_FORMAT "): progress is: " SIZE_FORMAT, r->index(), 
+                         (start_of_range - r->bottom()), (end_of_range - r->bottom()),
+                         pointer_delta(end_of_range, start_of_range) / ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR);
+#endif
             _heap->throttler()->report_updaterefs(pointer_delta(end_of_range, start_of_range)
                                                   / ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR);
           }
@@ -3440,6 +3470,11 @@ void ShenandoahHeap::flush_liveness_cache(uint worker_id) {
   if (ShenandoahPacing) {
     ShenandoahHeap::heap()->pacer()->report_mark(total_live_accumulation);
   } else if (ShenandoahThrottleAllocations) {
+#define KELVIN_MARK
+#ifdef KELVIN_MARK
+    log_info(gc)("report_mark in ShenHeap::flush_liveness_cache(worker_id: %u): progress is: " SIZE_FORMAT,
+                 worker_id, total_live_accumulation);
+#endif
     ShenandoahHeap::heap()->throttler()->report_mark(total_live_accumulation);
   }
 }

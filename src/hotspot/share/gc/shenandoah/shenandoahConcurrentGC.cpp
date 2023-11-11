@@ -705,7 +705,7 @@ void ShenandoahConcurrentGC::op_init_mark() {
     assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
     size_t allocation_runway =
       ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
-    heap->throttler()->setup_for_mark(allocation_runway);
+    heap->throttler()->setup_for_mark(allocation_runway, _generation->is_global());
   }
 }
 
@@ -813,9 +813,8 @@ void ShenandoahConcurrentGC::op_final_mark() {
           size_t promo_in_place_words = heap->get_promote_in_place_bytes() >> LogHeapWordSize;
           size_t young_words_not_evacuated = heap->get_young_bytes_not_evacuated() >> LogHeapWordSize;
           size_t old_words_not_evacuated = heap->get_old_bytes_not_evacuated() >> LogHeapWordSize;
-          bool is_mixed_or_global = heap->doing_mixed_evacuations() || _generation->is_global();
           heap->throttler()->setup_for_evac(allocation_runway, evac_words, promo_in_place_words, young_words_not_evacuated,
-                                            old_words_not_evacuated, is_mixed_or_global);
+                                            old_words_not_evacuated, heap->doing_mixed_evacuations(), _generation->is_global());
         }
       } else {
         if (ShenandoahVerify) {

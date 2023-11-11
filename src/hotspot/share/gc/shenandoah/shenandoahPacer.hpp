@@ -246,7 +246,8 @@ private:
 
   // set and read once per phase, by control thread.
   const char *_phase_label;
-  size_t _most_recent_live_words;
+  size_t _most_recent_live_young_words;
+  size_t _most_recent_live_global_words;
 
   // Set once per phase
   volatile intptr_t _epoch;
@@ -254,9 +255,14 @@ private:
   volatile intptr_t _work_completed[ShenandoahThrottleBudgetSegmentsPerPhase];
   volatile size_t _budget_supplement[ShenandoahThrottleBudgetSegmentsPerPhase];
 
+#ifdef KELVIN_DEPRECATE
   // Set 4 times per phase (as quantums of work are completed)
   volatile size_t _authorized_allocations;
-
+#endif
+#define KELVIN_THROTTLES
+#ifdef KELVIN_THROTTLES
+  volatile size_t _threads_in_throttle;
+#endif
   // Updated rarely, only after an allocation request has been successfully or unsuccessfully throttled
   volatile size_t _allocation_requests_throttled;
   volatile size_t _total_words_throttled;
@@ -269,8 +275,11 @@ private:
 
   // Heavily updated, protect from accidental false sharing
   shenandoah_padding(0);
+#ifdef KELVIN_DEPRECATE
   // Words of memory allocated.
   volatile size_t _allocated;
+#endif
+  volatile intptr_t _available_words;
   shenandoah_padding(1);                // TODO: Is this redundant with shenandoah_padding(2), wasteful? no-op?
 
   // Heavily updated, protect from accidental false sharing
@@ -281,18 +290,21 @@ private:
 
 public:
   ShenandoahThrottler(ShenandoahHeap* heap) :
-          _heap(heap),
-          _is_generational(heap->mode()->is_generational()),
-          _wait_monitor(new Monitor(Mutex::safepoint-1, "ShenandoahWaitMonitor_lock", true)),
-          _phase_label(nullptr),
-          _most_recent_live_words(0),
-          _epoch(0),
-          _authorized_allocations(0),
-          _progress(PACING_PROGRESS_UNINIT) {}
+      _heap(heap),
+      _is_generational(heap->mode()->is_generational()),
+      _wait_monitor(new Monitor(Mutex::safepoint-1, "ShenandoahWaitMonitor_lock", true)),
+      _phase_label(nullptr),
+      _most_recent_live_young_words(0),
+      _most_recent_live_global_words(0),
+      _epoch(0),
+#ifdef KELVIN_THROTTLES
+      _threads_in_throttle(0),
+#endif
+      _progress(PACING_PROGRESS_UNINIT) {}
 
-  void setup_for_mark(size_t allocatable_words);
+  void setup_for_mark(size_t allocatable_words, bool is_global);
   void setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words,
-                      size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_or_global);
+                      size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed, bool is_global);
   void setup_for_updaterefs(size_t allocatable_words, size_t promo_in_place_words,
                             size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_or_global);
 
@@ -306,7 +318,7 @@ public:
 
   inline void report_alloc(size_t words);
 
-  bool claim_for_alloc(size_t words, bool force);
+  bool claim_for_alloc(intptr_t words, bool force, bool allow_greed = false);
   size_t throttle_for_alloc(ShenandoahAllocRequest req);
   void unthrottle_for_alloc(intptr_t epoch, size_t words);
 
