@@ -352,8 +352,9 @@ private:
   ShenandoahSharedFlag   _degenerated_gc_in_progress;
   ShenandoahSharedFlag   _full_gc_in_progress;
   ShenandoahSharedFlag   _full_gc_move_in_progress;
-  ShenandoahSharedFlag   _progress_last_gc;
   ShenandoahSharedFlag   _concurrent_strong_root_in_progress;
+
+  size_t _gc_no_progress_count;
 
   // TODO: Revisit the following comment.  It may not accurately represent the true behavior when evacuations fail due to
   // difficulty finding memory to hold evacuated objects.
@@ -531,8 +532,9 @@ private:
   void recycle_trash();
 public:
   void rebuild_free_set(bool concurrent);
-  void notify_gc_progress()    { _progress_last_gc.set();   }
-  void notify_gc_no_progress() { _progress_last_gc.unset(); }
+  void notify_gc_progress();
+  void notify_gc_no_progress();
+  size_t get_gc_no_progress_count() const;
 
 //
 // Mark support
@@ -871,14 +873,10 @@ public:
 
   static inline void increase_object_age(oop obj, uint additional_age);
 
-  // Return the object's age (at a safepoint or when object isn't
-  // mutable by the mutator)
-  static inline uint get_object_age(oop obj);
-
   // Return the object's age, or a sentinel value when the age can't
   // necessarily be determined because of concurrent locking by the
   // mutator
-  static inline uint get_object_age_concurrent(oop obj);
+  static inline uint get_object_age(oop obj);
 
   void transfer_old_pointers_from_satb();
 
