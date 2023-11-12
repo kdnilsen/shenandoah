@@ -250,7 +250,10 @@ private:
   size_t _most_recent_live_global_words;
 
   // Set once per phase
+
+  // _epoch represents the current phase of GC.  This is different from the current GC cycle.
   volatile intptr_t _epoch;
+
   // _work_completed and _budget_supplement are both defined in terms of words of memory.
   volatile intptr_t _work_completed[ShenandoahThrottleBudgetSegmentsPerPhase];
   volatile size_t _budget_supplement[ShenandoahThrottleBudgetSegmentsPerPhase];
@@ -259,7 +262,7 @@ private:
   // Set 4 times per phase (as quantums of work are completed)
   volatile size_t _authorized_allocations;
 #endif
-#define KELVIN_THROTTLES
+#undef KELVIN_THROTTLES
 #ifdef KELVIN_THROTTLES
   volatile size_t _threads_in_throttle;
 #endif

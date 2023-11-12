@@ -131,7 +131,7 @@ inline void ShenandoahThrottler::add_budget(size_t words) {
       original_budget = Atomic::load(&_available_words);
       new_budget = original_budget + supplement;
     } while (Atomic::cmpxchg(&_available_words, original_budget, new_budget, memory_order_relaxed) != original_budget);
-#define KELVIN_MONITOR
+#undef KELVIN_MONITOR
 #ifdef KELVIN_MONITOR
     log_info(gc, ergo)("Upon completion of work: " SIZE_FORMAT ", allocation budget is augmented by: " SIZE_FORMAT,
                        new_progress, supplement);

@@ -1718,7 +1718,7 @@ private:
       if (ShenandoahPacing) {
         _sh->pacer()->report_evac(r->used() >> LogHeapWordSize);
       } else if (ShenandoahThrottleAllocations) {
-#define KELVIN_EVAC
+#undef KELVIN_EVAC
 #ifdef KELVIN_EVAC
         log_info(gc)("report_evac in ShenEvacTask::do_work(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
                      r->index(), r->get_live_data_words());
@@ -1789,7 +1789,7 @@ private:
         if (ShenandoahPacing) {
           _sh->pacer()->report_evac(r->used() >> LogHeapWordSize);
         } else if (ShenandoahThrottleAllocations) {
-#define KELVIN_EVAC
+#undef KELVIN_EVAC
 #ifdef KELVIN_EVAC
           log_info(gc)("report_evac in ShenGenEvacTask::do_work(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
                        r->index(), r->get_live_data_words());
@@ -2524,8 +2524,14 @@ size_t ShenandoahHeap::get_promote_in_place_regions() const {
   return _promote_in_place_regions;
 }
 
+#undef KELVIN_UPDATE
+
 size_t ShenandoahHeap::get_promote_in_place_bytes() const {
   assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
+#ifdef KELVIN_UPDATE
+  log_info(gc)("get_promote_in_place_bytes() returns " SIZE_FORMAT "%s", 
+               byte_size_in_proper_unit(_promote_in_place_bytes),    proper_unit_for_byte_size(_promote_in_place_bytes));
+#endif
   return _promote_in_place_bytes;
 }
 
@@ -2541,12 +2547,36 @@ size_t ShenandoahHeap::get_old_bytes_to_evacuate() const {
 
 size_t ShenandoahHeap::get_young_bytes_not_evacuated() const {
   assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
-  return young_generation()->used() - collection_set()->young_bytes();
+  size_t young_used = young_generation()->used();
+  size_t young_garbage = collection_set()->get_young_garbage();
+  size_t cset_young = collection_set()->young_bytes();
+
+  size_t result = young_used - young_garbage - cset_young;
+
+#ifdef KELVIN_UPDATE
+  log_info(gc)("get_young_bytes_not_evacuated() returns " SIZE_FORMAT "%s from young used: " SIZE_FORMAT
+               "%s -  cset->young_bytes: "  SIZE_FORMAT "%s",
+               byte_size_in_proper_unit(result),       proper_unit_for_byte_size(result),
+               byte_size_in_proper_unit(young_used),   proper_unit_for_byte_size(young_used),
+               byte_size_in_proper_unit(cset_young),   proper_unit_for_byte_size(cset_young));
+#endif
+  return result;
 }
 
 size_t ShenandoahHeap::get_old_bytes_not_evacuated() const {
   assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
-  return old_generation()->used() - collection_set()->old_bytes();
+  size_t old_used = old_generation()->used();
+  size_t cset_old = collection_set()->old_bytes();
+  size_t old_garbage = collection_set()->get_old_garbage();
+  size_t result = old_used - old_garbage - cset_old;
+#ifdef KELVIN_UPDATE
+  log_info(gc)("get_old_bytes_not_evacuated() returns " SIZE_FORMAT "%s from old used: " SIZE_FORMAT
+               "%s -  cset->old_bytes: " SIZE_FORMAT "%s",
+               byte_size_in_proper_unit(result),     proper_unit_for_byte_size(result),
+               byte_size_in_proper_unit(old_used),   proper_unit_for_byte_size(old_used),
+               byte_size_in_proper_unit(cset_old),   proper_unit_for_byte_size(cset_old));
+#endif
+  return result;
 }
 
 void ShenandoahHeap::manage_satb_barrier(bool active) {
@@ -2952,11 +2982,13 @@ private:
         if (ShenandoahPacing) {
           _heap->pacer()->report_updaterefs(pointer_delta(update_watermark, r->bottom()));
         } else if (ShenandoahThrottleAllocations) {
-#define KELVIN_UPDATE
+#undef KELVIN_UPDATE
 #ifdef KELVIN_UPDATE
           log_info(gc)("report_updaterefs in ShenUpdateHeapRefsTask::do_work(young or global region: " SIZE_FORMAT
-                       "): progress is: " SIZE_FORMAT,
-                       r->index(), (r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
+                       " with live: " SIZE_FORMAT "%s): progress is: " SIZE_FORMAT,
+                       r->index(),
+                       byte_size_in_proper_unit(r->used()),  proper_unit_for_byte_size(r->used()),
+                       (r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
 #endif
           // We claim credit for all of used even though we only updated through update_watermark.  When we budgeted,
           // we did know the update_watermark for each region to be updated.
@@ -3079,7 +3111,7 @@ private:
           if (ShenandoahPacing && (start_of_range < end_of_range)) {
             _heap->pacer()->report_updaterefs(pointer_delta(end_of_range, start_of_range));
           } else if (ShenandoahThrottleAllocations && (start_of_range < end_of_range)) {
-#define KELVIN_UPDATE
+#undef KELVIN_UPDATE
 #ifdef KELVIN_UPDATE
             // We'll scan the remembered set of this region one slice at a time.  The sum of slices should represent
             // used for the region.
@@ -3470,7 +3502,7 @@ void ShenandoahHeap::flush_liveness_cache(uint worker_id) {
   if (ShenandoahPacing) {
     ShenandoahHeap::heap()->pacer()->report_mark(total_live_accumulation);
   } else if (ShenandoahThrottleAllocations) {
-#define KELVIN_MARK
+#undef KELVIN_MARK
 #ifdef KELVIN_MARK
     log_info(gc)("report_mark in ShenHeap::flush_liveness_cache(worker_id: %u): progress is: " SIZE_FORMAT,
                  worker_id, total_live_accumulation);

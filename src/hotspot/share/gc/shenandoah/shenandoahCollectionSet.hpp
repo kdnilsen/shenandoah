@@ -110,6 +110,7 @@ public:
   size_t get_young_available_bytes_collected() { return _young_available_bytes_collected; }
 
   inline size_t get_old_garbage();
+  inline size_t get_young_garbage();
 
   void establish_preselected(bool *preselected) { _preselected_regions = preselected; }
   void abandon_preselected() { _preselected_regions = nullptr; }

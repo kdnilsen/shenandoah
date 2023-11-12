@@ -1087,7 +1087,7 @@ void ShenandoahHeapRegion::promote_in_place() {
   }
 
   if (ShenandoahThrottleAllocations) {
-#define KELVIN_EVAC
+#undef KELVIN_EVAC
 #ifdef KELVIN_EVAC
     log_info(gc)("report_evac in ShenHeapRegion::promote_in_place(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
                  index(), used() >> LogHeapWordSize / ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR);

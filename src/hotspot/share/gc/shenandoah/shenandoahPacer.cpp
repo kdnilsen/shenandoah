@@ -340,15 +340,16 @@ void ShenandoahPacer::print_cycle_on(outputStream* out) {
   out->cr();
 }
 
-// A value of 6 signifies that updating a region is 12 times easier than evacuating a region.  The value is
+// A value of 16 signifies that updating a region is 16 times easier than evacuating a region.  The value is
 // determined empirically.  If we are more likely to throttle during evac than update refs, increase this value.
 // If more likely to throttle during update refs than evacuate, decrease this number.  Note that evacauating has
 // to read every value and write every value.  Updating only has to read reference values (N % of total live memory)
 // and then it overwrites the same value in x% of cases (i.e. if the original value points to CSET).  Different workloads
 // will behave differently.
 //
-// TODO: adjust this dynamically according to measurements of where we experience throttling.
-const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 6;
+// TODO: adjust this dynamically according to measurements of where we experience throttling and/or according to
+// which phase has more memory available at the end of phase.
+const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 16;
 
 // A value of 16 signifies that it is 16 times easier to process a promote-in-place region than to evacuate the live
 // data within a region.  Promote-in-place is based on usage, whereas evacuation is based on live.  The promote in place
@@ -357,9 +358,9 @@ const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 6;
 // the next live object.
 const uintx ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR = 16;
 
-// A value of 16 denotes that it is 32 times easier to update an old-gen region using the remembered set of dirty
-// cards than it is to update a young-gen region by examining every live object.
-const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 16;
+// A value of 32 denotes that it is 32 times easier to update an old-gen region using the remembered set of dirty
+// cards than it is to evacuate a region.
+const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 32;
 
 
 const uintx ShenandoahThrottler::MAX_THROTTLE_DELAY_MS = 128;
@@ -452,7 +453,9 @@ void ShenandoahThrottler::publish_metrics() {
                  byte_size_in_proper_unit(bytes_available),    proper_unit_for_byte_size(bytes_available),
                  byte_size_in_proper_unit(progress_in_bytes),  proper_unit_for_byte_size(progress_in_bytes));
     size_t bytes_throttled = _total_words_throttled << LogHeapWordSize;
-    log_info(gc)("    threads in throttle: %8ld", Atomic::load(&_threads_in_throttle));
+// Probably not worth the effort to monitor these...
+//    log_info(gc)("    threads in throttle: %8ld", Atomic::load(&_threads_in_throttle));
+//
     log_info(gc)("  throttled allocations: %8ld, total bytes throttled: %8ld%s",
                  _allocation_requests_throttled,
                  byte_size_in_proper_unit(bytes_throttled), proper_unit_for_byte_size(bytes_throttled));
@@ -475,6 +478,7 @@ void ShenandoahThrottler::publish_metrics() {
 void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when allocation throttling is enabled");
   publish_metrics();
+  Atomic::inc(&_epoch);
 
   // During marking, work progress is represented by total words marked.  Accumulation of marked words during marking
   // is not linear.  During the initial stages of marking, almost every object seen has not yet been marked.  During
@@ -566,6 +570,7 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
                                          bool is_mixed, bool is_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
   publish_metrics();
+  Atomic::inc(&_epoch);
 
   // Note that promo_in_place words are initially part of uncollected_young_words, but they end up as uncollected_old_words
   //
@@ -659,6 +664,7 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
                                                bool is_mixed_or_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
   publish_metrics();
+  Atomic::inc(&_epoch);
 
   size_t update_cost;
   if (is_mixed_or_global) {
@@ -723,6 +729,7 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
 void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
   publish_metrics();
+  Atomic::inc(&_epoch);
   
   assert(ShenandoahThrottleBudgetSegmentsPerPhase == 3, "Otherwise, the initializations that follow are not correct.");
 
@@ -760,6 +767,7 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
 void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
   publish_metrics();
+  Atomic::inc(&_epoch);
 
   assert(ShenandoahThrottleBudgetSegmentsPerPhase == 3, "Otherwise, the initializations that follow are not correct.");
 
@@ -835,6 +843,8 @@ bool ShenandoahThrottler::claim_for_alloc(intptr_t words, bool force, bool allow
   return true;
 }
 
+#undef KELVIN_THROTTLE
+
 // We unthrottle when an authorized allocation consumes less than was authorized.
 void ShenandoahThrottler::unthrottle_for_alloc(intptr_t epoch, size_t words) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
@@ -844,6 +854,10 @@ void ShenandoahThrottler::unthrottle_for_alloc(intptr_t epoch, size_t words) {
     return;
   }
 
+#ifdef KELVIN_THROTTLE
+  JavaThread* current_thread = JavaThread::current();
+  log_info(gc)("Unthrottle " PTR_FORMAT " for words: " SIZE_FORMAT, p2i(current_thread), words);
+#endif
   intptr_t old_budget, new_budget;
   do {
     old_budget = Atomic::load(&_available_words);
@@ -868,9 +882,7 @@ intptr_t ShenandoahThrottler::epoch() {
 // Of course, the forced authorization may result in an allocation failure, which may ultimately degenerate.
 size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
-
   size_t words = req.size();
-
   // Fast path: try to allocate right away
   if ( claim_for_alloc(words, false)) {
     return words;
@@ -919,6 +931,12 @@ size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
   size_t cumulative_pause = 0;
   size_t current_pause = MIN_THROTTLE_DELAY_MS;
 
+
+#ifdef KELVIN_THROTTLE
+  size_t available =  Atomic::load(&_available_words);
+  log_info(gc)("Throttle " PTR_FORMAT " for %s req, size: " SIZE_FORMAT " out of " SIZE_FORMAT " (epoch: %ld)",
+               p2i(current_thread), req.is_lab_alloc()? "tlab": "shared", req.size(), available, epoch_at_start);
+#endif
   words = req.size();
   do {
     wait(current_pause);
@@ -938,6 +956,11 @@ size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
       // ShenandoahThreadLocalData
       ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
       add_to_metrics(true, words, throttle_time);
+#ifdef KELVIN_THROTTLE
+      size_t new_available =  Atomic::load(&_available_words);
+      log_info(gc)("Release thread " PTR_FORMAT ", authorized " SIZE_FORMAT " after delay: %.6f with remnant available: " SIZE_FORMAT,
+                   p2i(current_thread), words, throttle_time, new_available);
+#endif
       return words;
     }
     current_pause *= 2;
@@ -956,6 +979,10 @@ size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
   // ShenandoahThreadLocalData
   ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
   add_to_metrics(false, words, throttle_time);
+#ifdef KELVIN_THROTTLE
+      log_info(gc)("Forced release throttle for thread " PTR_FORMAT ", allocating " SIZE_FORMAT " after throttle_time: %.6f",
+                   p2i(current_thread), words, throttle_time);
+#endif
   return words;
 }
 
@@ -964,10 +991,10 @@ void ShenandoahThrottler::wait(size_t time_ms) {
   // the thread interruptible status. MonitorLocker also checks for safepoints.
   assert(time_ms > 0, "Should not call this with zero argument, as it would stall until notify");
   assert(time_ms <= LONG_MAX, "Sanity");
-  Atomic::inc(&_threads_in_throttle, memory_order_relaxed);
+//   Atomic::inc(&_threads_in_throttle, memory_order_relaxed);
   MonitorLocker locker(_wait_monitor);
   _wait_monitor->wait((long)time_ms);
-  Atomic::dec(&_threads_in_throttle, memory_order_relaxed);
+//  Atomic::dec(&_threads_in_throttle, memory_order_relaxed);
 }
 
 void ShenandoahThrottler::notify_waiters() {

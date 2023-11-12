@@ -136,7 +136,7 @@ inline void ShenandoahMark::count_liveness(ShenandoahLiveData* live_data, oop ob
       if (ShenandoahPacing) {
         heap->pacer()->report_mark(new_val);
       } else if (ShenandoahThrottleAllocations) {
-#define KELVIN_MARK
+#undef KELVIN_MARK
 #ifdef KELVIN_MARK
         log_info(gc)("report_mark in ShenMark::count_liveness(worker_id: %u): progress is: " SIZE_FORMAT,
                      worker_id, new_val);
@@ -165,7 +165,7 @@ inline void ShenandoahMark::count_liveness(ShenandoahLiveData* live_data, oop ob
     if (ShenandoahPacing) {
       heap->pacer()->report_mark(humongous_words);
     } else if (ShenandoahThrottleAllocations) {
-#define KELVIN_MARK
+#undef KELVIN_MARK
 #ifdef KELVIN_MARK
       log_info(gc)("report_mark in ShenMark::count_liveness(worker_id: %u): humongous progress is: " SIZE_FORMAT,
                    worker_id, humongous_words);
