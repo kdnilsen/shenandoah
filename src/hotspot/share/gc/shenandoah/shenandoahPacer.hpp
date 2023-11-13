@@ -219,7 +219,7 @@ public:
   static const uintx PROMOTE_IN_PLACE_FACTOR;
 
   // Assume evacuation requires thirty two times the work of updating references within the remembered set.  Updating
-  // within the rememberes set only has to deal with pointers that are within DIRTY ranges of the remembered set.
+  // within the remembered set only has to deal with pointers that are within DIRTY ranges of the remembered set.
   // Much of the remembered set is not DIRTY and is not pointers.
   static const uintx REMEMBERED_SET_UPDATE_FACTOR;
 
@@ -306,8 +306,8 @@ public:
       _progress(PACING_PROGRESS_UNINIT) {}
 
   void setup_for_mark(size_t allocatable_words, bool is_global);
-  void setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words,
-                      size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed, bool is_global);
+  void setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words, size_t uncollected_young_words,
+                      size_t uncollected_old_words, bool is_mixed, bool is_global, bool is_bootstrap);
   void setup_for_updaterefs(size_t allocatable_words, size_t promo_in_place_words,
                             size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_or_global);
 

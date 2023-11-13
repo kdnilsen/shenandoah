@@ -340,7 +340,7 @@ void ShenandoahPacer::print_cycle_on(outputStream* out) {
   out->cr();
 }
 
-// A value of 16 signifies that updating a region is 16 times easier than evacuating a region.  The value is
+// A value of 48 signifies that updating a region is 48 times easier than evacuating a region.  The value is
 // determined empirically.  If we are more likely to throttle during evac than update refs, increase this value.
 // If more likely to throttle during update refs than evacuate, decrease this number.  Note that evacauating has
 // to read every value and write every value.  Updating only has to read reference values (N % of total live memory)
@@ -349,18 +349,18 @@ void ShenandoahPacer::print_cycle_on(outputStream* out) {
 //
 // TODO: adjust this dynamically according to measurements of where we experience throttling and/or according to
 // which phase has more memory available at the end of phase.
-const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 16;
+const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 48;
 
-// A value of 16 signifies that it is 16 times easier to process a promote-in-place region than to evacuate the live
+// A value of 32 signifies that it is 32 times easier to process a promote-in-place region than to evacuate the live
 // data within a region.  Promote-in-place is based on usage, whereas evacuation is based on live.  The promote in place
 // effort has to read the header of each marked object and has to write one header for each run of consecutive garbage
 // objects.  Promote in place identifies runs of consecutive garbage by asking the marking context for the location of
 // the next live object.
 const uintx ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR = 16;
 
-// A value of 32 denotes that it is 32 times easier to update an old-gen region using the remembered set of dirty
+// A value of 64 denotes that it is 64 times easier to update an old-gen region using the remembered set of dirty
 // cards than it is to evacuate a region.
-const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 32;
+const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 64;
 
 
 const uintx ShenandoahThrottler::MAX_THROTTLE_DELAY_MS = 128;
@@ -492,7 +492,7 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
 
   size_t projected_work;
   if (is_global) {
-    size_t global_used = ShenandoahHeap::heap()->global_generation()->used();
+    size_t global_used = ShenandoahHeap::heap()->global_generation()->used() >> LogHeapWordSize;
     if (_most_recent_live_global_words == 0) {
       // No history yet.  Assume everything needs to be marked. During initialization, a high percentage of objects will
       // be persistent, so this is a safe conservative assumption.  Note that we do not have to "mark" objects that are
@@ -502,7 +502,7 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
       projected_work = MIN2(_most_recent_live_global_words * 2, global_used);
     }
   } else {
-    size_t young_used = ShenandoahHeap::heap()->young_generation()->used();
+    size_t young_used = ShenandoahHeap::heap()->young_generation()->used() >> LogHeapWordSize;
     if (_most_recent_live_young_words == 0) {
       // No history yet.  Assume everything needs to be marked. During initialization, a high percentage of objects will
       // be persistent, so this is a safe conservative assumption.  Note that we do not have to "mark" objects that are
@@ -567,7 +567,7 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
 
 void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words,
                                          size_t uncollected_young_words, size_t uncollected_old_words,
-                                         bool is_mixed, bool is_global) {
+                                         bool is_mixed, bool is_global, bool is_bootstrap) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
   publish_metrics();
   Atomic::inc(&_epoch);
@@ -591,7 +591,7 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
     } else {
       _most_recent_live_young_words = evac_words + uncollected_young_words;
     }
-  } else {
+  } else if (!is_bootstrap) {
     _most_recent_live_young_words = _progress;
     if (evac_words + uncollected_young_words > _most_recent_live_young_words) {
       size_t floating_garbage_estimate = (evac_words + uncollected_young_words) - _most_recent_live_young_words;;
@@ -605,6 +605,8 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
       _most_recent_live_global_words = (evac_words + uncollected_young_words + uncollected_old_words);
     }
   }
+  // else is_bootstrap.  Bootstrap cycle has extra marking work, which is a combination of young and old.
+  // Do not update _most_recent values.
 
   size_t evac_cost = evac_words + promo_in_place_words / PROMOTE_IN_PLACE_FACTOR;
   size_t update_cost;
@@ -666,6 +668,15 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
   publish_metrics();
   Atomic::inc(&_epoch);
 
+  // We use uncollected words to estimate the update-refs effort.  We are consistent between budgeting (here) and
+  // reporting, as update-refs work is completed.  A more accurate estimate would be uncollected-words below
+  // update-water-mark, but that value is not conveniently available without iterating over all regions.
+  //
+  // An unintended side effect of the current approach is that uncollected words continues to grow as concurrent
+  // mutators continue to allocate.  This means the reported work is larger than the budgeted work.  This means
+  // the budget supplements may be granted sooner than was originally intended.  In general, this is harmless.
+  // The "only" potential negative impact is that throttle allocations earlier in the update-refs phase a bit
+  // less and throttle allocations later in the update-refs phase a bit more.
   size_t update_cost;
   if (is_mixed_or_global) {
     update_cost = (uncollected_young_words + uncollected_old_words) / EVACUATE_VS_UPDATE_FACTOR;
@@ -867,7 +878,12 @@ void ShenandoahThrottler::unthrottle_for_alloc(intptr_t epoch, size_t words) {
   // Notify unconditionally.  Don't second guess whether there are threads waiting in throttling requests. Threads
   // can be waiting even if original_budget was > 0 because very large requests may be forced to delay even when
   // budget is sufficient and smaller requests will delay if budget is positive but insufficient.
-  wake_throttled();
+
+  // Let's not notify here to reduce thrashing and kernel service overhead.  The amount of memory returned by unthrottle
+  // is usually relatively small.  Waiting threads will awaken at the end of their most recent sleep span, and they will
+  // be notified at the start of the next phase.
+
+  // wake_throttled();
 }
 
 intptr_t ShenandoahThrottler::epoch() {

@@ -814,7 +814,8 @@ void ShenandoahConcurrentGC::op_final_mark() {
           size_t young_words_not_evacuated = heap->get_young_bytes_not_evacuated() >> LogHeapWordSize;
           size_t old_words_not_evacuated = heap->get_old_bytes_not_evacuated() >> LogHeapWordSize;
           heap->throttler()->setup_for_evac(allocation_runway, evac_words, promo_in_place_words, young_words_not_evacuated,
-                                            old_words_not_evacuated, heap->doing_mixed_evacuations(), _generation->is_global());
+                                            old_words_not_evacuated, heap->doing_mixed_evacuations(),
+                                            _generation->is_global(), _do_old_gc_bootstrap);
         }
       } else {
         if (ShenandoahVerify) {
