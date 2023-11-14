@@ -108,29 +108,27 @@ inline void ShenandoahThrottler::wake_throttled() {
   _need_notify_waiters.try_set();
 }
 
-inline void ShenandoahThrottler::add_budget(size_t words) {
-  STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
-  intptr_t inc = (intptr_t) words;
-
-  intptr_t orig_progress, new_progress;
+inline void ShenandoahThrottler::add_budget(size_t words_of_completed_work) {
+  size_t orig_progress, new_progress;
   do {
     orig_progress = Atomic::load(&_progress);
-    new_progress = orig_progress + words;
+    new_progress = orig_progress + words_of_completed_work;
   } while (Atomic::cmpxchg(&_progress, orig_progress, new_progress, memory_order_relaxed) != orig_progress);
 
-  // Did I move progress across a budget threshold?  If so, augment the budget.
+  // Did I move progress across a budget threshold?
   size_t supplement = 0;
-  for (uintx i = 0; i < ShenandoahThrottleBudgetSegmentsPerPhase; i++) {
+  for (uintx i = 0; i < _GCPhase_Count; i++) {
     if ((orig_progress < _work_completed[i]) && (new_progress >= _work_completed[i])) {
       supplement += _budget_supplement[i];
     }
   }
+
   if (supplement > 0) {
-    intptr_t original_budget, new_budget;
-    do {
-      original_budget = Atomic::load(&_available_words);
-      new_budget = original_budget + supplement;
-    } while (Atomic::cmpxchg(&_available_words, original_budget, new_budget, memory_order_relaxed) != original_budget);
+    STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
+    intptr_t inc = supplement;
+    // If we moved across a budget threshold, augment the budget.
+    Atomic::add(&_available_words, inc, memory_order_relaxed);
+    Atomic::add(&_phase_authorized, supplement, memory_order_relaxed);
 #undef KELVIN_MONITOR
 #ifdef KELVIN_MONITOR
     log_info(gc, ergo)("Upon completion of work: " SIZE_FORMAT ", allocation budget is augmented by: " SIZE_FORMAT,

@@ -493,7 +493,7 @@ jint ShenandoahHeap::initialize() {
         // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
         // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
         // not trigger the next GC because it prevents allocation pool from being depleted.
-    _throttler->setup_for_idle(allocation_runway * 2);
+    _throttler->setup_for_idle(allocation_runway);
   } else {
     _throttler = nullptr;
   }

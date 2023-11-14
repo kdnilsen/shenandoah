@@ -382,7 +382,7 @@ void ShenandoahControlThread::run_service() {
         // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
         // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
         // not trigger the next GC because it prevents allocation pool from being depleted.
-        heap->throttler()->setup_for_idle(allocation_runway * 2);
+        heap->throttler()->setup_for_idle(allocation_runway);
       }
     } else {
       // Allow allocators to know we have seen this much regions
@@ -781,7 +781,7 @@ void ShenandoahControlThread::service_concurrent_cycle(ShenandoahHeap* heap,
     // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
     // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
     // not trigger the next GC because it prevents allocation pool from being depleted.
-    heap->throttler()->setup_for_idle(allocation_runway * 2);
+    heap->throttler()->setup_for_idle(allocation_runway);
   }
 }
 
