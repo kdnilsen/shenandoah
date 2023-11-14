@@ -670,7 +670,7 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
 
   size_t phase_budget = 3 * words_allocatable / 4;
 
-  assert(_Microphase_Count = _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   _work_completed[_first_microphase] = (size_t) (0.125 * projected_work); // first 1/8 of projected work
   _work_completed[_second_microphase] = (size_t) (0.25 * projected_work);  // 1/8 more
@@ -749,7 +749,7 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
   size_t projected_work = (size_t) evac_cost;
   size_t phase_budget = (size_t) (allocatable_words * evac_fraction_of_total);
 
-  assert(_Microphase_Count = _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   _work_completed[_first_microphase] = (size_t) (0.25 * projected_work);  // first 1/4 of projected work
   _work_completed[_second_microphase] = (size_t) (0.50 * projected_work);  // 1/4 more
@@ -798,7 +798,7 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
   size_t projected_work = update_cost;
   size_t phase_budget = allocatable_words;
 
-  assert(_Microphase_Count = _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   _work_completed[_first_microphase] = (size_t) (0.25 * projected_work);  // first 1/4 of projected work
   _work_completed[_second_microphase] = (size_t) (0.50 * projected_work);  // 1/4 more
@@ -831,7 +831,7 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
   publish_metrics();
   Atomic::inc(&_epoch);
   
-  assert(_Microphase_Count = _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   // No work will be recorded, so it doesn't really matter what value we store here.
   _work_completed[_first_microphase] = (size_t) 0x7fffffffL;
@@ -860,7 +860,7 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   publish_metrics();
   Atomic::inc(&_epoch);
 
-  assert(_Microphase_Count = _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   // No work will be recorded, so it doesn't really matter what value we store here.
   _work_completed[_first_microphase] = (size_t) 0x7fffffffL;
