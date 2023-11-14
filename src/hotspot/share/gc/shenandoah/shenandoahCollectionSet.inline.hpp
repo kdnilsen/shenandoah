@@ -70,4 +70,8 @@ size_t ShenandoahCollectionSet::get_old_garbage() {
   return _old_garbage;
 }
 
+size_t ShenandoahCollectionSet::get_young_garbage() {
+  return _garbage - _old_garbage;
+}
+
 #endif // SHARE_GC_SHENANDOAH_SHENANDOAHCOLLECTIONSET_INLINE_HPP

@@ -546,7 +546,6 @@ size_t ShenandoahGeneration::select_aged_regions(size_t old_available, size_t nu
   size_t promote_in_place_live = 0;
   size_t promote_in_place_pad = 0;
   size_t anticipated_candidates = 0;
-  size_t anticipated_promote_in_place_regions = 0;
 
   // Sort the promotion-eligible regions according to live-data-bytes so that we can first reclaim regions that require
   // less evacuation effort.  This prioritizes garbage first, expanding the allocation pool before we begin the work of
@@ -622,9 +621,6 @@ size_t ShenandoahGeneration::select_aged_regions(size_t old_available, size_t nu
           anticipated_candidates++;
           promo_potential += r->get_live_data_bytes();
         }
-        else {
-          anticipated_promote_in_place_regions++;
-        }
       }
     }
     // Note that we keep going even if one region is excluded from selection.
@@ -659,6 +655,7 @@ size_t ShenandoahGeneration::select_aged_regions(size_t old_available, size_t nu
   }
   heap->set_pad_for_promote_in_place(promote_in_place_pad);
   heap->set_promotion_potential(promo_potential);
+  heap->set_promote_in_place_load(promote_in_place_regions, promote_in_place_live);
   return old_consumed;
 }
 

@@ -48,6 +48,7 @@
 #include "gc/shenandoah/shenandoahVMOperations.hpp"
 #include "gc/shenandoah/shenandoahWorkGroup.hpp"
 #include "gc/shenandoah/shenandoahWorkerPolicy.hpp"
+#include "gc/shenandoah/heuristics/shenandoahAdaptiveHeuristics.hpp"
 #include "memory/allocation.hpp"
 #include "prims/jvmtiTagMap.hpp"
 #include "runtime/vmThread.hpp"
@@ -603,6 +604,11 @@ void ShenandoahConcurrentGC::op_reset() {
   ShenandoahHeap* const heap = ShenandoahHeap::heap();
   if (ShenandoahPacing) {
     heap->pacer()->setup_for_reset();
+  } else if (ShenandoahThrottleAllocations) {
+    assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+    heap->throttler()->setup_for_reset(allocation_runway);
   }
   _generation->prepare_gc();
 }
@@ -709,6 +715,12 @@ void ShenandoahConcurrentGC::op_init_mark() {
   if (ShenandoahPacing) {
     heap->pacer()->setup_for_mark();
   }
+  else if (ShenandoahThrottleAllocations) {
+    assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+    heap->throttler()->setup_for_mark(allocation_runway, _generation->is_global());
+  }
 }
 
 void ShenandoahConcurrentGC::op_mark_roots() {
@@ -807,6 +819,17 @@ void ShenandoahConcurrentGC::op_final_mark() {
 
         if (ShenandoahPacing) {
           heap->pacer()->setup_for_evac();
+        } else if (ShenandoahThrottleAllocations) {
+          assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+          size_t allocation_runway = 
+            ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+          size_t evac_words = (heap->get_young_bytes_to_evacuate() + heap->get_old_bytes_to_evacuate()) >> LogHeapWordSize;
+          size_t promo_in_place_words = heap->get_promote_in_place_bytes() >> LogHeapWordSize;
+          size_t young_words_not_evacuated = heap->get_young_bytes_not_evacuated() >> LogHeapWordSize;
+          size_t old_words_not_evacuated = heap->get_old_bytes_not_evacuated() >> LogHeapWordSize;
+          heap->throttler()->setup_for_evac(allocation_runway, evac_words, promo_in_place_words, young_words_not_evacuated,
+                                            old_words_not_evacuated, heap->doing_mixed_evacuations(),
+                                            _generation->is_global(), _do_old_gc_bootstrap);
         }
       } else {
         if (ShenandoahVerify) {
@@ -849,6 +872,8 @@ void ShenandoahConcurrentGC::op_final_mark() {
         if (ShenandoahPacing) {
           heap->pacer()->setup_for_evac();
         }
+        // Note: ShenandoahThrottleAllocations is not currently
+        // supported in non-generational mode.
       } else {
         if (ShenandoahVerify) {
           heap->verifier()->verify_after_concmark();
@@ -1185,6 +1210,16 @@ void ShenandoahConcurrentGC::op_init_updaterefs() {
   }
   if (ShenandoahPacing) {
     heap->pacer()->setup_for_updaterefs();
+  } else if (ShenandoahThrottleAllocations) {
+    assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+    size_t promo_in_place_words = heap->get_promote_in_place_bytes() >> LogHeapWordSize;
+    size_t young_words_not_evacuated = heap->get_young_bytes_not_evacuated() >> LogHeapWordSize;
+    size_t old_words_not_evacuated = heap->get_old_bytes_not_evacuated() >> LogHeapWordSize;
+    bool is_mixed_or_global = heap->doing_mixed_evacuations() || _generation->is_global();
+    heap->throttler()->setup_for_updaterefs(allocation_runway, promo_in_place_words,
+                                            young_words_not_evacuated, old_words_not_evacuated, is_mixed_or_global);
   }
 }
 

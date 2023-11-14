@@ -46,6 +46,7 @@
 #include "gc/shenandoah/shenandoahUtils.hpp"
 #include "gc/shenandoah/shenandoahVMOperations.hpp"
 #include "gc/shenandoah/shenandoahWorkerPolicy.hpp"
+#include "gc/shenandoah/heuristics/shenandoahAdaptiveHeuristics.hpp"
 #include "gc/shenandoah/heuristics/shenandoahHeuristics.hpp"
 #include "gc/shenandoah/mode/shenandoahMode.hpp"
 #include "logging/log.hpp"
@@ -72,7 +73,7 @@ ShenandoahControlThread::ShenandoahControlThread() :
   reset_gc_id();
   create_and_start();
   _periodic_task.enroll();
-  if (ShenandoahPacing) {
+  if (ShenandoahPacing || ShenandoahThrottleAllocations) {
     _periodic_pacer_notify_task.enroll();
   }
 }
@@ -87,8 +88,11 @@ void ShenandoahPeriodicTask::task() {
 }
 
 void ShenandoahPeriodicPacerNotify::task() {
-  assert(ShenandoahPacing, "Should not be here otherwise");
-  ShenandoahHeap::heap()->pacer()->notify_waiters();
+  if (ShenandoahPacing) {
+    ShenandoahHeap::heap()->pacer()->notify_waiters();
+  } else if (ShenandoahThrottleAllocations) {
+    ShenandoahHeap::heap()->throttler()->notify_waiters();
+  }
 }
 
 void ShenandoahControlThread::run_service() {
@@ -370,6 +374,15 @@ void ShenandoahControlThread::run_service() {
       // GC is over, we are at idle now
       if (ShenandoahPacing) {
         heap->pacer()->setup_for_idle();
+      } else if (ShenandoahThrottleAllocations) {
+        assert(heap->mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+        size_t allocation_runway =
+          ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+        // We double the allocation runway for idle because we do not want any throttling during idle spans.
+        // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
+        // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
+        // not trigger the next GC because it prevents allocation pool from being depleted.
+        heap->throttler()->setup_for_idle(allocation_runway);
       }
     } else {
       // Allow allocators to know we have seen this much regions
@@ -419,6 +432,11 @@ void ShenandoahControlThread::process_phase_timings(const ShenandoahHeap* heap) 
   if (ShenandoahPacing) {
     heap->pacer()->flush_stats_to_cycle();
   }
+#ifdef KELVIN_DEPRECATE
+  else if (ShenandoahThrottleAllocations) {
+    heap->throttler()->flush_stats_to_cycle();
+  }
+#endif
 
   ShenandoahEvacuationTracker* evac_tracker = heap->evac_tracker();
   ShenandoahCycleStats         evac_stats   = evac_tracker->flush_cycle_to_global();
@@ -435,6 +453,11 @@ void ShenandoahControlThread::process_phase_timings(const ShenandoahHeap* heap) 
       if (ShenandoahPacing) {
         heap->pacer()->print_cycle_on(&ls);
       }
+#ifdef KELVIN_DEPRECATE
+      else if (ShenandoahThrottleAllocations) {
+        heap->throttler()->print_cycle_on(&ls);
+      }
+#endif
     }
   }
 
@@ -736,6 +759,18 @@ void ShenandoahControlThread::service_concurrent_cycle(ShenandoahHeap* heap,
                                  "At end of GC";
   }
   heap->log_heap_status(msg);
+  if (generation->is_young() && !heap->cancelled_gc() && do_old_gc_bootstrap) {
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+    // We're about to start up concurrent old marking. This counts as idle time insofar as young-gen triggering
+    // heuristics are concerned.
+    //
+    // We double the allocation runway for idle because we do not want any throttling during idle spans.
+    // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
+    // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
+    // not trigger the next GC because it prevents allocation pool from being depleted.
+    heap->throttler()->setup_for_idle(allocation_runway);
+  }
 }
 
 bool ShenandoahControlThread::check_cancellation_or_degen(ShenandoahGC::ShenandoahDegenPoint point) {
@@ -1045,7 +1080,7 @@ void ShenandoahControlThread::notify_heap_changed() {
 }
 
 void ShenandoahControlThread::pacing_notify_alloc(size_t words) {
-  assert(ShenandoahPacing, "should only call when pacing is enabled");
+  assert(ShenandoahPacing || ShenandoahThrottleAllocations, "should only call when pacing or throttling is enabled");
   Atomic::add(&_allocs_seen, words, memory_order_relaxed);
 }
 

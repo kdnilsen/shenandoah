@@ -484,6 +484,19 @@ jint ShenandoahHeap::initialize() {
   } else {
     _pacer = nullptr;
   }
+  if (ShenandoahThrottleAllocations) {
+    assert(mode()->is_generational(), "Only generational mode supports throttling in current implementation");
+    _throttler = new ShenandoahThrottler(this);
+    size_t allocation_runway =
+      ((ShenandoahAdaptiveHeuristics *) (young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
+        // We double the allocation runway for idle because we do not want any throttling during idle spans.
+        // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
+        // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
+        // not trigger the next GC because it prevents allocation pool from being depleted.
+    _throttler->setup_for_idle(allocation_runway);
+  } else {
+    _throttler = nullptr;
+  }
 
   _control_thread = new ShenandoahControlThread();
   _regulator_thread = new ShenandoahRegulatorThread(_control_thread);
@@ -622,6 +635,7 @@ ShenandoahHeap::ShenandoahHeap(ShenandoahCollectorPolicy* policy) :
   _shenandoah_policy(policy),
   _free_set(nullptr),
   _pacer(nullptr),
+  _throttler(nullptr),
   _verifier(nullptr),
   _phase_timings(nullptr),
   _evac_tracker(nullptr),
@@ -816,7 +830,7 @@ void ShenandoahHeap::increase_used(const ShenandoahAllocRequest& req) {
     // only actual size counts toward usage for mutator allocations
     increase_used(generation, actual_bytes);
 
-    // notify pacer of both actual size and waste
+    // notify pacer or throttler of both actual size and waste
     notify_mutator_alloc_words(req.actual_size(), req.waste());
 
     if (wasted_bytes > 0 && req.actual_size() > ShenandoahHeapRegion::humongous_threshold_words()) {
@@ -858,6 +872,11 @@ void ShenandoahHeap::notify_mutator_alloc_words(size_t words, size_t waste) {
     control_thread()->pacing_notify_alloc(words);
     if (waste > 0) {
       pacer()->claim_for_alloc(waste, true);
+    }
+  } else if (ShenandoahThrottleAllocations) {
+    control_thread()->pacing_notify_alloc(words);
+    if (waste > 0) {
+      throttler()->claim_for_alloc(waste, true);
     }
   }
 }
@@ -1336,14 +1355,28 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
   bool in_new_region = false;
   HeapWord* result = nullptr;
 
+  size_t min_size = req.is_lab_alloc()? req.min_size(): req.size();
+  ShenandoahAllocRequest surrogate = ShenandoahAllocRequest::for_tlab(min_size, min_size);
+  bool use_surrogate_req = false;
   if (req.is_mutator_alloc()) {
     if (ShenandoahPacing) {
       pacer()->pace_for_alloc(req.size());
       pacer_epoch = pacer()->epoch();
+    } else if (ShenandoahThrottleAllocations) {
+      size_t authorized_size = throttler()->throttle_for_alloc(req);
+      pacer_epoch = throttler()->epoch();
+      if (authorized_size < req.size()) {
+        use_surrogate_req = true;
+      }
     }
 
     if (!ShenandoahAllocFailureALot || !should_inject_alloc_failure()) {
-      result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      if (use_surrogate_req) {
+        result = allocate_memory_under_lock(surrogate, in_new_region, is_promotion);
+        req.set_actual_size(surrogate.actual_size());
+      } else {
+        result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      }
     }
 
     // Check that gc overhead is not exceeded.
@@ -1369,7 +1402,12 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
     while (result == nullptr
         && (get_gc_no_progress_count() == 0 || original_count == shenandoah_policy()->full_gc_count())) {
       control_thread()->handle_alloc_failure(req);
-      result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      if (use_surrogate_req) {
+        result = allocate_memory_under_lock(surrogate, in_new_region, is_promotion);
+        req.set_actual_size(surrogate.actual_size());
+      } else {
+        result = allocate_memory_under_lock(req, in_new_region, is_promotion);
+      }
     }
 
     if (log_is_enabled(Debug, gc, alloc)) {
@@ -1377,7 +1415,6 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
       log_debug(gc, alloc)("Thread: %s, Result: " PTR_FORMAT ", Request: %s, Size: " SIZE_FORMAT ", Original: " SIZE_FORMAT ", Latest: " SIZE_FORMAT,
                            Thread::current()->name(), p2i(result), req.type_string(), req.size(), original_count, get_gc_no_progress_count());
     }
-
   } else {
     assert(req.is_gc_alloc(), "Can only accept GC allocs here");
     result = allocate_memory_under_lock(req, in_new_region, is_promotion);
@@ -1398,20 +1435,27 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
   // for any waste created by retiring regions with this request.
   increase_used(req);
 
-  if (result != nullptr) {
-    size_t requested = req.size();
-    size_t actual = req.actual_size();
+  size_t requested = use_surrogate_req? surrogate.size(): req.size();
+  size_t actual = req.actual_size();
 
-    assert (req.is_lab_alloc() || (requested == actual),
-            "Only LAB allocations are elastic: %s, requested = " SIZE_FORMAT ", actual = " SIZE_FORMAT,
-            ShenandoahAllocRequest::alloc_type_to_string(req.type()), requested, actual);
+  assert (req.is_lab_alloc() || (requested == actual),
+          "Only LAB allocations are elastic: %s, requested = " SIZE_FORMAT ", actual = " SIZE_FORMAT,
+          ShenandoahAllocRequest::alloc_type_to_string(req.type()), requested, actual);
 
-    if (req.is_mutator_alloc()) {
-      // If we requested more than we were granted, give the rest back to pacer.
-      // This only matters if we are in the same pacing epoch: do not try to unpace
-      // over the budget for the other phase.
-      if (ShenandoahPacing && (pacer_epoch > 0) && (requested > actual)) {
+  if (req.is_mutator_alloc()) {
+    // If we requested more than we were granted, including if we were granted nothing, give the rest back to pacer.
+    // This only matters if we are in the same pacing epoch. Do not try to unpace into the budget of a subsequent cycle.
+    if (ShenandoahPacing) {
+      if ((pacer_epoch > 0) && (requested > actual)) {
         pacer()->unpace_for_alloc(pacer_epoch, requested - actual);
+      } else if (requested < actual) {
+        pacer()->claim_for_alloc(actual - requested, true);
+      }
+    } else if (ShenandoahThrottleAllocations) {
+      if ((pacer_epoch > 0) && (requested > actual)) {
+        throttler()->unthrottle_for_alloc(pacer_epoch, requested - actual);
+      } else if (requested < actual) {
+        throttler()->claim_for_alloc(actual - requested, true);
       }
     }
   }
@@ -1700,6 +1744,13 @@ private:
 
       if (ShenandoahPacing) {
         _sh->pacer()->report_evac(r->used() >> LogHeapWordSize);
+      } else if (ShenandoahThrottleAllocations) {
+#undef KELVIN_EVAC
+#ifdef KELVIN_EVAC
+        log_info(gc)("report_evac in ShenEvacTask::do_work(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
+                     r->index(), r->get_live_data_words());
+#endif
+        _sh->throttler()->report_evac(r->get_live_data_words());
       }
       if (_sh->check_cancelled_gc_and_yield(_concurrent)) {
         break;
@@ -1764,6 +1815,13 @@ private:
         _sh->marked_object_iterate(r, &cl);
         if (ShenandoahPacing) {
           _sh->pacer()->report_evac(r->used() >> LogHeapWordSize);
+        } else if (ShenandoahThrottleAllocations) {
+#undef KELVIN_EVAC
+#ifdef KELVIN_EVAC
+          log_info(gc)("report_evac in ShenGenEvacTask::do_work(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
+                       r->index(), r->get_live_data_words());
+#endif
+          _sh->throttler()->report_evac(r->get_live_data_words());
         }
       } else if (r->is_young() && r->is_active() && (r->age() >= _tenuring_threshold)) {
         HeapWord* tams = ctx->top_at_mark_start(r);
@@ -2489,6 +2547,71 @@ void ShenandoahHeap::set_aging_cycle(bool in_progress) {
   _is_aging_cycle.set_cond(in_progress);
 }
 
+void ShenandoahHeap::set_promote_in_place_load(size_t regions, size_t live_bytes) {
+  _promote_in_place_regions = regions;
+  _promote_in_place_bytes = live_bytes;
+}
+
+size_t ShenandoahHeap::get_promote_in_place_regions() const {
+  assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
+  return _promote_in_place_regions;
+}
+
+#undef KELVIN_UPDATE
+
+size_t ShenandoahHeap::get_promote_in_place_bytes() const {
+  assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
+#ifdef KELVIN_UPDATE
+  log_info(gc)("get_promote_in_place_bytes() returns " SIZE_FORMAT "%s", 
+               byte_size_in_proper_unit(_promote_in_place_bytes),    proper_unit_for_byte_size(_promote_in_place_bytes));
+#endif
+  return _promote_in_place_bytes;
+}
+
+size_t ShenandoahHeap::get_young_bytes_to_evacuate() const {
+  assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
+  return collection_set()->young_bytes();
+}
+
+size_t ShenandoahHeap::get_old_bytes_to_evacuate() const {
+  assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
+  return collection_set()->old_bytes();
+}
+
+size_t ShenandoahHeap::get_young_bytes_not_evacuated() const {
+  assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
+  size_t young_used = young_generation()->used();
+  size_t young_garbage = collection_set()->get_young_garbage();
+  size_t cset_young = collection_set()->young_bytes();
+
+  size_t result = young_used - young_garbage - cset_young;
+
+#ifdef KELVIN_UPDATE
+  log_info(gc)("get_young_bytes_not_evacuated() returns " SIZE_FORMAT "%s from young used: " SIZE_FORMAT
+               "%s -  cset->young_bytes: "  SIZE_FORMAT "%s",
+               byte_size_in_proper_unit(result),       proper_unit_for_byte_size(result),
+               byte_size_in_proper_unit(young_used),   proper_unit_for_byte_size(young_used),
+               byte_size_in_proper_unit(cset_young),   proper_unit_for_byte_size(cset_young));
+#endif
+  return result;
+}
+
+size_t ShenandoahHeap::get_old_bytes_not_evacuated() const {
+  assert(is_evacuation_in_progress() || is_update_refs_in_progress(), "Only relevant during evac or updaterefs");
+  size_t old_used = old_generation()->used();
+  size_t cset_old = collection_set()->old_bytes();
+  size_t old_garbage = collection_set()->get_old_garbage();
+  size_t result = old_used - old_garbage - cset_old;
+#ifdef KELVIN_UPDATE
+  log_info(gc)("get_old_bytes_not_evacuated() returns " SIZE_FORMAT "%s from old used: " SIZE_FORMAT
+               "%s -  cset->old_bytes: " SIZE_FORMAT "%s",
+               byte_size_in_proper_unit(result),     proper_unit_for_byte_size(result),
+               byte_size_in_proper_unit(old_used),   proper_unit_for_byte_size(old_used),
+               byte_size_in_proper_unit(cset_old),   proper_unit_for_byte_size(cset_old));
+#endif
+  return result;
+}
+
 void ShenandoahHeap::manage_satb_barrier(bool active) {
   if (is_concurrent_mark_in_progress()) {
     // Ignore request to deactivate barrier while concurrent mark is in progress.
@@ -2889,8 +3012,22 @@ private:
                  r->affiliation_name(), r->index());
         }
       }
-      if (region_progress && ShenandoahPacing) {
-        _heap->pacer()->report_updaterefs(pointer_delta(update_watermark, r->bottom()));
+      if (region_progress) {
+        if (ShenandoahPacing) {
+          _heap->pacer()->report_updaterefs(pointer_delta(update_watermark, r->bottom()));
+        } else if (ShenandoahThrottleAllocations) {
+#undef KELVIN_UPDATE
+#ifdef KELVIN_UPDATE
+          log_info(gc)("report_updaterefs in ShenUpdateHeapRefsTask::do_work(young or global region: " SIZE_FORMAT
+                       " with live: " SIZE_FORMAT "%s): progress is: " SIZE_FORMAT,
+                       r->index(),
+                       byte_size_in_proper_unit(r->used()),  proper_unit_for_byte_size(r->used()),
+                       (r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
+#endif
+          // We claim credit for all of used even though we only updated through update_watermark.  When we budgeted,
+          // we did know the update_watermark for each region to be updated.
+          _heap->throttler()->report_updaterefs((r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
+        }
       }
       if (_heap->check_cancelled_gc_and_yield(CONCURRENT)) {
         return;
@@ -3007,6 +3144,18 @@ private:
           }
           if (ShenandoahPacing && (start_of_range < end_of_range)) {
             _heap->pacer()->report_updaterefs(pointer_delta(end_of_range, start_of_range));
+          } else if (ShenandoahThrottleAllocations && (start_of_range < end_of_range)) {
+#undef KELVIN_UPDATE
+#ifdef KELVIN_UPDATE
+            // We'll scan the remembered set of this region one slice at a time.  The sum of slices should represent
+            // used for the region.
+            log_info(gc)("report_updaterefs in ShenUpdateHeapRefsTask::do_work(old remset region: " SIZE_FORMAT
+                         " slice[" SIZE_FORMAT " .. " SIZE_FORMAT "): progress is: " SIZE_FORMAT, r->index(), 
+                         (start_of_range - r->bottom()), (end_of_range - r->bottom()),
+                         pointer_delta(end_of_range, start_of_range) / ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR);
+#endif
+            _heap->throttler()->report_updaterefs(pointer_delta(end_of_range, start_of_range)
+                                                  / ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR);
           }
         }
       }
@@ -3380,13 +3529,25 @@ void ShenandoahHeap::flush_liveness_cache(uint worker_id) {
   assert(_liveness_cache != nullptr, "sanity");
   ShenandoahLiveData* ld = _liveness_cache[worker_id];
 
+  size_t total_live_accumulation = 0;
   for (uint i = 0; i < num_regions(); i++) {
     ShenandoahLiveData live = ld[i];
     if (live > 0) {
       ShenandoahHeapRegion* r = get_region(i);
       r->increase_live_data_gc_words(live);
+      total_live_accumulation += live;
       ld[i] = 0;
     }
+  }
+  if (ShenandoahPacing) {
+    ShenandoahHeap::heap()->pacer()->report_mark(total_live_accumulation);
+  } else if (ShenandoahThrottleAllocations) {
+#undef KELVIN_MARK
+#ifdef KELVIN_MARK
+    log_info(gc)("report_mark in ShenHeap::flush_liveness_cache(worker_id: %u): progress is: " SIZE_FORMAT,
+                 worker_id, total_live_accumulation);
+#endif
+    ShenandoahHeap::heap()->throttler()->report_mark(total_live_accumulation);
   }
 }
 

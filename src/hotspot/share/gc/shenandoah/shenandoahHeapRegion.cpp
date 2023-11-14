@@ -1085,6 +1085,15 @@ void ShenandoahHeapRegion::promote_in_place() {
     // add_old_collector_free_region() increases promoted_reserve() if available space exceeds PLAB::min_size()
     heap->free_set()->add_old_collector_free_region(this);
   }
+
+  if (ShenandoahThrottleAllocations) {
+#undef KELVIN_EVAC
+#ifdef KELVIN_EVAC
+    log_info(gc)("report_evac in ShenHeapRegion::promote_in_place(region: " SIZE_FORMAT "): progress is: " SIZE_FORMAT,
+                 index(), used() >> LogHeapWordSize / ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR);
+#endif
+    heap->throttler()->report_evac((used() >> LogHeapWordSize) / ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR);
+  }
 }
 
 void ShenandoahHeapRegion::promote_humongous() {

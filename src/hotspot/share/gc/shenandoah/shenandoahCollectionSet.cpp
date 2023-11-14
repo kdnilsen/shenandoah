@@ -46,6 +46,7 @@ ShenandoahCollectionSet::ShenandoahCollectionSet(ShenandoahHeap* heap, ReservedS
   _used(0),
   _live(0),
   _region_count(0),
+  _old_region_count(0),
   _old_garbage(0),
   _current_index(0) {
 
@@ -105,7 +106,10 @@ void ShenandoahCollectionSet::add_region(ShenandoahHeapRegion* r) {
   }
 
   _region_count++;
-  _has_old_regions |= r->is_old();
+  if (r->is_old()) {
+    _has_old_regions = true;
+    _old_region_count++;
+  }
   _garbage += garbage;
   _used += r->used();
   _live += live;
@@ -130,6 +134,7 @@ void ShenandoahCollectionSet::clear() {
   _live = 0;
 
   _region_count = 0;
+  _old_region_count = 0;
   _current_index = 0;
 
   _young_bytes_to_evacuate = 0;

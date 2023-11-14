@@ -70,4 +70,75 @@ inline void ShenandoahPacer::add_budget(size_t words) {
   }
 }
 
+inline void ShenandoahThrottler::report_mark(size_t words) {
+  report_internal(words);
+#ifdef KELVIN_DEPRECATE
+  report_progress_internal(words);
+#endif
+}
+
+inline void ShenandoahThrottler::report_evac(size_t words) {
+  report_internal(words);
+}
+
+inline void ShenandoahThrottler::report_updaterefs(size_t words) {
+  report_internal(words);
+}
+
+inline void ShenandoahThrottler::report_alloc(size_t words) {
+  report_internal(words);
+}
+
+inline void ShenandoahThrottler::report_internal(size_t words) {
+  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
+  add_budget(words);
+}
+
+#ifdef KELVIN_DEPRECATE
+// ShenandoahPacer handled mark phase differently than other phases.
+// ShenandoahThrottler handls all the same.
+inline void ShenandoahThrottler::report_progress_internal(size_t words) {
+  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
+  STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
+  Atomic::add(&_progress, (intptr_t)words, memory_order_relaxed);
+}
+#endif
+
+inline void ShenandoahThrottler::wake_throttled() {
+  _need_notify_waiters.try_set();
+}
+
+inline void ShenandoahThrottler::add_budget(size_t words_of_completed_work) {
+  size_t orig_progress, new_progress;
+  do {
+    orig_progress = Atomic::load(&_progress);
+    new_progress = orig_progress + words_of_completed_work;
+  } while (Atomic::cmpxchg(&_progress, orig_progress, new_progress, memory_order_relaxed) != orig_progress);
+
+  // Did I move progress across a budget threshold?
+  size_t supplement = 0;
+  for (uintx i = 0; i < _GCPhase_Count; i++) {
+    if ((orig_progress < _work_completed[i]) && (new_progress >= _work_completed[i])) {
+      supplement += _budget_supplement[i];
+    }
+  }
+
+  if (supplement > 0) {
+    STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
+    intptr_t inc = supplement;
+    // If we moved across a budget threshold, augment the budget.
+    Atomic::add(&_available_words, inc, memory_order_relaxed);
+    Atomic::add(&_phase_authorized, supplement, memory_order_relaxed);
+#undef KELVIN_MONITOR
+#ifdef KELVIN_MONITOR
+    log_info(gc, ergo)("Upon completion of work: " SIZE_FORMAT ", allocation budget is augmented by: " SIZE_FORMAT,
+                       new_progress, supplement);
+#endif
+    // Notify unconditionally.  Don't second guess whether there are threads waiting in throttling requests. Threads
+    // can be waiting even if original_budget was > 0 because very large requests may be forced to delay even when
+    // budget is sufficient and smaller requests will delay if budget is positive but insufficient.
+    wake_throttled();
+  }
+}
+
 #endif // SHARE_GC_SHENANDOAH_SHENANDOAHPACER_INLINE_HPP

@@ -242,7 +242,11 @@ void ShenandoahHeuristics::adjust_penalty(intx step) {
 void ShenandoahHeuristics::record_success_concurrent(bool abbreviated) {
   _gc_times_learned++;
 
-  adjust_penalty(Concurrent_Adjust);
+  if (ShenandoahThrottleAllocations && ShenandoahHeap::heap()->throttler()->cycle_had_throttles()) {
+    adjust_penalty(Degenerated_Penalty);
+  } else {
+    adjust_penalty(Concurrent_Adjust);
+  }
 
   if (_gc_times_learned <= ShenandoahLearningSteps || !(abbreviated && ShenandoahAdaptiveIgnoreShortCycles)) {
     _gc_cycle_time_history->add(elapsed_cycle_time());
