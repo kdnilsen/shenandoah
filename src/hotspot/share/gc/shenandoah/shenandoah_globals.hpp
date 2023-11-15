@@ -499,7 +499,7 @@
           "and complete before allocation failure is reached.  Mutually "   \
           "exclusive with ShenandoahThrottleAllocations.")                  \
                                                                             \
-  product(bool, ShenandoahThrottleAllocations, true, EXPERIMENTAL,         \
+  product(bool, ShenandoahThrottleAllocations, false, EXPERIMENTAL,         \
           "(Generational mode only) "                                       \
           "Throttle application allocations to allow young GC phases to "   \
           "complete before the supply of allocatable memory has been "      \

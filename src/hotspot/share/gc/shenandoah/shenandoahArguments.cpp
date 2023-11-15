@@ -182,6 +182,13 @@ void ShenandoahArguments::initialize() {
     FLAG_SET_DEFAULT(TLABAllocationWeight, 90);
   }
 
+#define KELVIN_EXPERIMENT
+#ifdef KELVIN_EXPERIMENT
+  if (!strcmp(ShenandoahGCMode, "generational")) {
+    ShenandoahThrottleAllocations = true;
+  }
+#endif
+
   if (ShenandoahPacing && ShenandoahThrottleAllocations) {
     // User settings error, report and ask user to rectify.
     vm_exit_during_initialization("Shenandoah expects at most one of ShenandoahPacing and ShenandoahThrottleAllocations");

@@ -430,11 +430,11 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
     // Something bad happened.  In general, we'll want to make acceleration triggers more sensitive.
     // However, if we are already too sensitive, we may be starving old-gen marking, in which case "something bad
     // happening" motivates decreased sensitivity.  For now, we'll use high value of _gc_time_penalties
-    // to denote that we are too overly sensitive.
+    // to denote that we are already overly sensitive.
     // TODO: Be more sophisticated in detecting that we are overly sensitive.  Consider monitoring
     //       consecutive young GC cycles that shatrt with zero headroom.
     if (_gc_time_penalties + step > 25) {
-      _acceleration_goodness_ratio *= 0.96;     // decrease sensitivity by 4%
+      _acceleration_goodness_ratio *= 0.92;     // decrease sensitivity by 8%
     } else {
       _acceleration_goodness_ratio *= 1.12;     // increase sensitivity by 12%
     }
