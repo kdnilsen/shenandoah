@@ -1438,7 +1438,7 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
   size_t requested = use_surrogate_req? surrogate.size(): req.size();
   size_t actual = req.actual_size();
 
-  assert (req.is_lab_alloc() || (requested == actual),
+  assert ((result == nullptr) || req.is_lab_alloc() || (requested == actual),
           "Only LAB allocations are elastic: %s, requested = " SIZE_FORMAT ", actual = " SIZE_FORMAT,
           ShenandoahAllocRequest::alloc_type_to_string(req.type()), requested, actual);
 
