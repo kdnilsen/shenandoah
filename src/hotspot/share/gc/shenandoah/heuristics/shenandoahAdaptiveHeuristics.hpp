@@ -217,6 +217,7 @@ protected:
 
   double _acceleration_goodness_ratio;
   size_t _consecutive_goodness;
+  size_t _consecutive_goodness_sample_size;
 
   size_t min_free_threshold();
 };

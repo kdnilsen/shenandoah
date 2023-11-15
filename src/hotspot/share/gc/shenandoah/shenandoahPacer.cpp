@@ -880,13 +880,6 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   Atomic::store(&_progress, (size_t) 0L);
   reset_metrics(_reset, 0, allocatable_words, allocatable_words);
   wake_throttled();
-
-  size_t bytes_authorized = allocatable_words << LogHeapWordSize;
-  log_info(gc, ergo)("Throttle Reset Phase Budget: " SIZE_FORMAT "%s (all authorized now)",
-                     byte_size_in_proper_unit(bytes_authorized),    proper_unit_for_byte_size(bytes_authorized));
-  /*
-   * No value in dumping supplementals.
-   */
 }
 
 #ifdef KELVIN_DOES_NOT_NEED

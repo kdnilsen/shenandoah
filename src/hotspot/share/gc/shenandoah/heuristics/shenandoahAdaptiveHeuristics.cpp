@@ -97,7 +97,8 @@ ShenandoahAdaptiveHeuristics::ShenandoahAdaptiveHeuristics(ShenandoahSpaceInfo* 
   _spike_acceleration_rate_timestamps(NEW_C_HEAP_ARRAY(double, ShenandoahRateAccelerationSampleSize, mtGC)),
   _most_recent_headroom_at_start_of_idle(0),
   _acceleration_goodness_ratio(ShenandoahInitialAcceleratedAllocationRateGoodnessRatio),
-  _consecutive_goodness(0) { }
+  _consecutive_goodness(0),
+  _consecutive_goodness_sample_size(8) { }
 
 ShenandoahAdaptiveHeuristics::~ShenandoahAdaptiveHeuristics() {
   FREE_C_HEAP_ARRAY(double, _spike_acceleration_rate_samples);
@@ -430,18 +431,20 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
     // However, if we are already too sensitive, we may be starving old-gen marking, in which case "something bad
     // happening" motivates decreased sensitivity.  For now, we'll use high value of _gc_time_penalties
     // to denote that we are too overly sensitive.
-    // TODO: Should we be more sophisticated in detecting that we are overly sensitive, such as monitoring
-    //       consecutive young GC cycles with zero headroom?
+    // TODO: Be more sophisticated in detecting that we are overly sensitive.  Consider monitoring
+    //       consecutive young GC cycles that shatrt with zero headroom.
     if (_gc_time_penalties + step > 25) {
-      _acceleration_goodness_ratio *= 0.95;     // decrease sensitivity
+      _acceleration_goodness_ratio *= 0.96;     // decrease sensitivity by 4%
     } else {
-      _acceleration_goodness_ratio *= 1.10;     // increase sensitivity
+      _acceleration_goodness_ratio *= 1.12;     // increase sensitivity by 12%
     }
     _consecutive_goodness = 0;
-  } else if (++_consecutive_goodness >= 10) {
-    // We've seen 10 good cycles in a row.  Let's make acceleration triggers slightly less sensitive.
-    _acceleration_goodness_ratio *= 0.95;
+    _consecutive_goodness_sample_size = 8;      // decrease sensitiivty (again) after 8 more good cycles
+  } else if (++_consecutive_goodness >= _consecutive_goodness_sample_size) {
+    // We've seen many good cycles in a row.
+    _acceleration_goodness_ratio *= 0.96;       // decrease sensitivity by 4%
     _consecutive_goodness = 0;
+    _consecutive_goodness_sample_size *= 2;     // wait twice as long before decreasing sensitivity again
   }
 
   intx new_val = _gc_time_penalties + step;
