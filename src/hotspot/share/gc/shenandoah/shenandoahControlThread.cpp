@@ -759,7 +759,7 @@ void ShenandoahControlThread::service_concurrent_cycle(ShenandoahHeap* heap,
                                  "At end of GC";
   }
   heap->log_heap_status(msg);
-  if (generation->is_young() && !heap->cancelled_gc() && do_old_gc_bootstrap) {
+  if (generation->is_young() && !heap->cancelled_gc() && do_old_gc_bootstrap && ShenandoahThrottleAllocations) {
     size_t allocation_runway =
       ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
     // We're about to start up concurrent old marking. This counts as idle time insofar as young-gen triggering
