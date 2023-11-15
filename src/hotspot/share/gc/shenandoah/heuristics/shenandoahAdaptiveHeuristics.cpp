@@ -447,6 +447,12 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
     _consecutive_goodness_sample_size *= 2;     // wait twice as long before decreasing sensitivity again
   }
 
+  if (_acceleration_goodness_ratio > 0.18) {
+    _acceleration_goodness_ratio = 0.18;
+  } else if (_acceleration_goodness_ratio < 0.06) {
+    _acceleration_goodness_ratio = 0.06;
+  }
+
   intx new_val = _gc_time_penalties + step;
   if (step > 0) {
 #ifdef KELVIN_VISIBLE
