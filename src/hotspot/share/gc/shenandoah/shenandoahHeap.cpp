@@ -3021,12 +3021,11 @@ private:
           log_info(gc)("report_updaterefs in ShenUpdateHeapRefsTask::do_work(young or global region: " SIZE_FORMAT
                        " with live: " SIZE_FORMAT "%s): progress is: " SIZE_FORMAT,
                        r->index(),
-                       byte_size_in_proper_unit(r->used()),  proper_unit_for_byte_size(r->used()),
-                       (r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
+                       byte_size_in_proper_unit(r->used()),  proper_unit_for_byte_size(r->used()), r->used() >> LogHeapWordSize);
 #endif
           // We claim credit for all of used even though we only updated through update_watermark.  When we budgeted,
           // we did know the update_watermark for each region to be updated.
-          _heap->throttler()->report_updaterefs((r->used() >> LogHeapWordSize) / ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR);
+          _heap->throttler()->report_updaterefs(r->used() >> LogHeapWordSize);
         }
       }
       if (_heap->check_cancelled_gc_and_yield(CONCURRENT)) {

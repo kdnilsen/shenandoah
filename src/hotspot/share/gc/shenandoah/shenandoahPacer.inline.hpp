@@ -70,6 +70,23 @@ inline void ShenandoahPacer::add_budget(size_t words) {
   }
 }
 
+// Don't allow any allocation to make the budget negative, unless force.
+// Don't let a very large allocation consume more than half the remaining budget unless allow_greed
+//  If a thread wants more than half of remaining budget, we'll throttle it at least once so that
+//  multiple less greedy threads have a chance to proceed before memory is granted to this thread.
+inline bool ShenandoahThrottler::claim_for_alloc(intptr_t words, bool force, bool allow_greed) {
+  assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
+  // Assume this allocation does not need to be throttled.
+  // Fast path is one atomic sub for each allocation request.
+  intptr_t new_budget = Atomic::sub(&_available_words, words, memory_order_relaxed);
+  if (((new_budget < 0) && !force) || ((new_budget < words) && !allow_greed)) {
+    // Oops!  We took too much.  Give it back.
+    Atomic::add(&_available_words, words, memory_order_relaxed);
+    return false;
+  }
+  return true;
+}
+
 inline void ShenandoahThrottler::report_mark(size_t words) {
   report_internal(words);
 #ifdef KELVIN_DEPRECATE
@@ -82,7 +99,8 @@ inline void ShenandoahThrottler::report_evac(size_t words) {
 }
 
 inline void ShenandoahThrottler::report_updaterefs(size_t words) {
-  report_internal(words);
+  size_t scaled = (size_t) (words / _evacuate_vs_update_factor);
+  report_internal(scaled);
 }
 
 inline void ShenandoahThrottler::report_alloc(size_t words) {

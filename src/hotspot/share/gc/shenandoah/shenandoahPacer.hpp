@@ -210,9 +210,9 @@ private:
  */
 class ShenandoahThrottler : public CHeapObj<mtGC> {
 public:
-  // Assume evacuation requires four times the work of updating: Evacuation reads and writes every word.  Updateing only
+  // Assume evacuation requires N times the work of updating: Evacuation reads and writes every word.  Updating only
   // reads and overwrites reference words that refer to the collection set after looking up the forewarding pointer.
-  static const uintx EVACUATE_VS_UPDATE_FACTOR;
+  static const double INITIAL_EVACUATE_VS_UPDATE_FACTOR;
 
   // Assume evacuation requires sixteen times the work of promoting in place.  Promote in place only looks at headers of
   // marked objects, and writes new headers between each run of consecutive marked objects.
@@ -258,6 +258,15 @@ private:
   Monitor* _wait_monitor;
   ShenandoahSharedFlag _need_notify_waiters;
 
+  // The effort to evacuate is modeled as this factor multiplied by the effort required to update, as scaled by the
+  // relevant workload basis.  The basis for evacuation is live memory within collection set.  The basis for updating
+  // is used memory not in the collection set, with special accommodations for old-gen memory for which updating
+  // is expedited by use of a remembered set.
+  //
+  // A larger value of _evacuate_vs_update_factor denotes that evacuation work is much harder than updating work.
+  // In other words, large value provides large budget to evacuation.
+  double _evacuate_vs_update_factor;
+
   // Metrics gathered for logging
   size_t _log_effort[_GCPhase_Count];
   size_t _log_progress[_GCPhase_Count];
@@ -278,6 +287,16 @@ private:
   size_t _log_max_words_failed[_GCPhase_Count];
   double _log_max_time_failed[_GCPhase_Count];
   double _log_total_time_failed[_GCPhase_Count];
+
+  intptr_t _log_allocatable_at_end[_GCPhase_Count];
+  size_t _log_carryovers[_GCPhase_Count];
+
+  // Metrics gathered for recalibration
+  intptr_t _available_sum[_GCPhase_Count];
+  size_t _requests_stalled_sum[_GCPhase_Count];
+  size_t _words_stalled_sum[_GCPhase_Count];
+
+  size_t _recalibrate_count;
 
   // set and read once per phase, by control thread.
   GCPhase _phase_label;
@@ -320,6 +339,8 @@ private:
   volatile double _max_time_failed;
   volatile double _total_time_failed;
 
+  volatile size_t _phase_carryovers;
+
   // Heavily updated, protect from accidental false sharing
   shenandoah_padding(0);
 #ifdef KELVIN_DEPRECATE
@@ -350,6 +371,15 @@ public:
   void setup_for_idle(size_t allocatable_words);
   void setup_for_reset(size_t allocatable_words);
 
+  inline size_t scale_updaterefs_work(size_t work) {
+    size_t scaled = (size_t) (work / _evacuate_vs_update_factor);
+    return scaled;
+  }
+
+  inline size_t scale_evac_work(size_t work) {
+    return work;
+  }
+
   inline void report_mark(size_t words);
   inline void report_evac(size_t words);
   inline void report_updaterefs(size_t words);
@@ -370,8 +400,9 @@ public:
 private:
   void publish_metrics();
   void reset_metrics(GCPhase id, size_t planned_work, size_t budget, size_t initial_authorization);
-  void add_to_metrics(bool successful, size_t words, double delay);
-  void log_metrics_and_prep_for_next();
+  void add_to_metrics(bool successful, size_t words, double delay, size_t epoch_delta);
+  void recalibrate_phase_efforts();
+  void log_metrics_and_prep_for_next(double evac_update_factor);
 
   inline void report_internal(size_t words);
   inline void report_progress_internal(size_t words);

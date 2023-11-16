@@ -346,10 +346,7 @@ void ShenandoahPacer::print_cycle_on(outputStream* out) {
 // to read every value and write every value.  Updating only has to read reference values (N % of total live memory)
 // and then it overwrites the same value in x% of cases (i.e. if the original value points to CSET).  Different workloads
 // will behave differently.
-//
-// TODO: adjust this dynamically according to measurements of where we experience throttling and/or according to
-// which phase has more memory available at the end of phase.
-const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 48;
+const double ShenandoahThrottler::INITIAL_EVACUATE_VS_UPDATE_FACTOR = 48.0;
 
 // A value of 32 signifies that it is 32 times easier to process a promote-in-place region than to evacuate the live
 // data within a region.  Promote-in-place is based on usage, whereas evacuation is based on live.  The promote in place
@@ -358,9 +355,9 @@ const uintx ShenandoahThrottler::EVACUATE_VS_UPDATE_FACTOR = 48;
 // the next live object.
 const uintx ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR = 16;
 
-// A value of 64 denotes that it is 64 times easier to update an old-gen region using the remembered set of dirty
-// cards than it is to evacuate a region.
-const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 64;
+// The effort to update remembered set memory is assumed to be 8 times easier than updating memory without a remembered set.
+// TODO: make this adaptive.
+const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 8;
 
 
 const uintx ShenandoahThrottler::MAX_THROTTLE_DELAY_MS = 128;
@@ -370,6 +367,8 @@ ShenandoahThrottler::ShenandoahThrottler(ShenandoahHeap* heap) :
     _heap(heap),
     _is_generational(heap->mode()->is_generational()),
     _wait_monitor(new Monitor(Mutex::safepoint-1, "ShenandoahWaitMonitor_lock", true)),
+    _evacuate_vs_update_factor(INITIAL_EVACUATE_VS_UPDATE_FACTOR),
+    _recalibrate_count(0),
     _phase_label(_not_a_label),
     _most_recent_live_young_words(0),
     _most_recent_live_global_words(0),
@@ -393,24 +392,28 @@ ShenandoahThrottler::ShenandoahThrottler(ShenandoahHeap* heap) :
     _log_max_time_throttled[p]   = 0.0;
     _log_total_time_throttled[p] = 0.0;
   
-    _log_failed[p]            = 0;
-    _log_words_failed[p]      = 0;
-    _log_min_words_failed[p]  = SIZE_MAX;
-    _log_max_words_failed[p]  = 0;
-    _log_max_time_failed[p]   = 0.0;
-    _log_total_time_failed[p] = 0.0;
+    _log_failed[p]               = 0;
+    _log_words_failed[p]         = 0;
+    _log_min_words_failed[p]     = SIZE_MAX;
+    _log_max_words_failed[p]     = 0;
+    _log_max_time_failed[p]      = 0.0;
+    _log_total_time_failed[p]    = 0.0;
+
+    _log_allocatable_at_end[p]   = 0;
   }
 }
 
 
-void ShenandoahThrottler::add_to_metrics(bool successful, size_t words, double delay) {
-
+void ShenandoahThrottler::add_to_metrics(bool successful, size_t words, double delay, size_t phase_delta) {
   size_t old_val, new_val;
   double old_dv, new_dv;
 
+  // We do not distinguish between multiple throttles that spanned one phase, vs, a single throttle that spanned multiple phases.
+  if (phase_delta > 0) {
+    Atomic::add(&_phase_carryovers, phase_delta, memory_order_relaxed);
+  }
   if (successful) {
     Atomic::inc(&_allocation_requests_throttled);
-
     // _total_words_throttled
     do {
       old_val = Atomic::load(&_total_words_throttled);
@@ -524,6 +527,8 @@ void ShenandoahThrottler::reset_metrics(GCPhase id, size_t planned_work, size_t 
 
   _total_time_throttled = 0.0;
   _total_time_failed = 0.0;
+
+  _phase_carryovers = 0;
 }
 
 void ShenandoahThrottler::publish_metrics() {
@@ -554,15 +559,108 @@ void ShenandoahThrottler::publish_metrics() {
     _log_words_failed[_phase_label]      += _total_words_failed;
     _log_min_words_failed[_phase_label]   = MIN2(_min_words_failed, _log_min_words_failed[_phase_label]);
     _log_max_words_failed[_phase_label]   = MAX2(_max_words_failed, _log_max_words_failed[_phase_label]);
-    _log_max_time_failed[_phase_label]    = MAX2(_max_time_failed, _log_max_time_failed[_phase_label]);;
+    _log_max_time_failed[_phase_label]    = MAX2(_max_time_failed, _log_max_time_failed[_phase_label]);
     _log_total_time_failed[_phase_label] += _total_time_failed;
 
+    _log_allocatable_at_end[_phase_label] = MAX2(_available_words, _log_allocatable_at_end[_phase_label]);
+
+    _log_carryovers[_phase_label]        += _phase_carryovers;
+
     if (_phase_label == _update) {
-      log_metrics_and_prep_for_next();
+      double evac_update_factor = _evacuate_vs_update_factor;
+      recalibrate_phase_efforts();
+      log_metrics_and_prep_for_next(evac_update_factor);
     }
   }
-  // else, this is the start of very first phase, and there is no piror phase to be reported
+  // else, this is the start of very first phase, and there is no prior phase to be reported
 }
+
+// Every 16 cycles, check whether the proportions between phase budgets are appropriate
+static const int RECALIBRATE_PERIOD = 16;
+
+void ShenandoahThrottler::recalibrate_phase_efforts() {
+  for (int p = _idle; p < _GCPhase_Count; p++) {
+    _available_sum[p] += _log_allocatable_at_end[p];
+    size_t reqs_stalled = _log_requests[p] + _log_failed[p];
+    size_t words_stalled = _log_words_throttled[p] + _log_words_failed[p];
+
+    if ((_log_carryovers[p] > 0) && (p > _idle)) {
+      // Assume all carryovers originated in preceding phase (though they could have originated multiple phases back)
+      _requests_stalled_sum[p] = reqs_stalled - _log_carryovers[p];
+      _requests_stalled_sum[p-1] += _log_carryovers[p];
+      size_t words_per_req = words_stalled / reqs_stalled;
+      size_t carryover_words = _log_carryovers[p] * words_per_req;
+      _words_stalled_sum[p-1] += carryover_words;
+      _words_stalled_sum[p] = words_stalled - carryover_words;
+    } else if (_log_carryovers[p] > 0) {
+      // We'll count carryovers into idle as if they originated during update-refs
+      _requests_stalled_sum[p] = reqs_stalled - _log_carryovers[p];
+      _requests_stalled_sum[_update] += _log_carryovers[p];
+      size_t words_per_req = words_stalled / reqs_stalled;
+      size_t carryover_words = _log_carryovers[p] * words_per_req;
+      _words_stalled_sum[_update] += carryover_words;
+      _words_stalled_sum[p] = words_stalled - carryover_words;
+    } else {
+      _words_stalled_sum[p] += words_stalled;
+      _requests_stalled_sum[p] += reqs_stalled;
+    }
+  }
+
+  if (++_recalibrate_count >= RECALIBRATE_PERIOD) {
+    if (_words_stalled_sum[_update] > _words_stalled_sum[_evac]) {
+      if (_words_stalled_sum[_evac] / (double) _words_stalled_sum[_update] < 0.50) {
+        // _update needs a larger budget
+        _evacuate_vs_update_factor *= 0.9;;
+      }
+    } else if (_words_stalled_sum[_update] < _words_stalled_sum[_evac]) {
+      if (_words_stalled_sum[_update] / (double) _words_stalled_sum[_evac] < 0.50) {
+        // _evac needs a larger budget
+        _evacuate_vs_update_factor *= 1.1;
+      }
+    } else {
+      // else, we stalled the same in each (probably zero).  Use remaining allocatable to guide recalibration.
+      if (_available_sum[_update] > _available_sum[_evac]) {
+        if ((_available_sum[_evac] >= 0) && ((_available_sum[_evac] / (double) _available_sum[_update]) < 0.50)) {
+          // _evac needs a larger budget
+          _evacuate_vs_update_factor *= 1.1;
+        } else if ((_available_sum[_update] > 0) && (_available_sum[_evac] < 0)) {
+          // evac needs a larger budget
+          _evacuate_vs_update_factor *= 1.1;
+        }
+        // else, leave budgets as is:
+        //  1. _available_sum[update] <= 0: so both are negative
+        //  2. or, _available_sum[evac] >= 0: so both are positive (but ratio does not justify change)
+      } else if (_available_sum[_update] < _available_sum[_evac]) {
+        if ((_available_sum[_update] >= 0) && ((_available_sum[_update] / (double) _available_sum[_evac]) < 0.50)) {
+          // _update needs a larger budget
+          _evacuate_vs_update_factor *= 0.9;
+        } else if ((_available_sum[_evac] > 0) && (_available_sum[_update] < 0)) {
+          // _update needs a larger budget
+          _evacuate_vs_update_factor *= 0.9;
+        }
+        // else, leave budgets as is:
+        //  1. _available_sum[evac <= 0: so both are negative
+        //  2. or, _available_sum[update] >= 0: so both are positive (but ratio does not justify change)
+      }
+      // else, let the status quo remain.
+
+    }
+#define KELVIN_RECALIBRATE
+#ifdef KELVIN_RECALIBRATE
+    log_info(gc)("KELVIN recalibrate to %.3f based on _stalled[evac] " SIZE_FORMAT ", stalled[update]: " SIZE_FORMAT
+                 ", aval[eva]: " SIZE_FORMAT ", avail[update]: " SIZE_FORMAT, _evacuate_vs_update_factor,
+                 _words_stalled_sum[_update], _words_stalled_sum[_evac], _available_sum[_update], _available_sum[_evac]);
+#endif
+    for (int p = _idle; p < _GCPhase_Count; p++) {
+      _requests_stalled_sum[p] = 0;
+      _words_stalled_sum[p] = 0;
+      _available_sum[p] = 0;
+    }
+    _recalibrate_count = 0;
+  }
+}
+
+
 
 const char* ShenandoahThrottler::phase_name(GCPhase p) {
   switch (p) {
@@ -578,24 +676,26 @@ const char* ShenandoahThrottler::phase_name(GCPhase p) {
 #define FORMAT_WORDS(x)  byte_size_in_proper_unit(((x) == (SIZE_MAX))? 0: (x) << LogHeapWordSize), \
                          proper_unit_for_byte_size(((x) == (SIZE_MAX))? 0: (x) << LogHeapWordSize)
 
-void ShenandoahThrottler::log_metrics_and_prep_for_next() {
-  log_info(gc, ergo)("Throttle report" " with my big number: " SIZE_FORMAT, SIZE_MAX);
-  log_info(gc, ergo)("%6s  %8s %8s %8s %8s %8s %8s %8s %8s %8s %11s %11s %8s %8s %8s %8s %11s %11s",
-                     "Phase", "Effort", "Progress", "Budget", "Alloted", "Alloced", "GoodReqs", "Bytes", "Min", "Max",
-                     "MaxTime", "TotTime", "BadReqs", "Bytes", "Min", "Max", "MaxTime", "TotTime");
+void ShenandoahThrottler::log_metrics_and_prep_for_next(double evac_update_factor) {
+  log_info(gc, ergo)("Throttle report (evac vs update factor: %.3f)", evac_update_factor);
+  log_info(gc, ergo)("%6s  %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %11s %11s %8s %8s %8s %8s %11s %11s %8s",
+                     "Phase", "Effort", "Progress", "Budget", "Alloted", "Alloced", "Avail", "GoodReqs", "Bytes", "Min", "Max",
+                     "MaxTime", "TotTime", "BadReqs", "Bytes", "Min", "Max", "MaxTime", "TotTime", "Overflow");
   for (int p = _idle; p <= _update; p++) {
+    size_t allocatable = (size_t) _log_allocatable_at_end[p];
     log_info(gc, ergo)("%6s: " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
-                       SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
+                       SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s "
+                       SIZE_FORMAT_W(7) "%s "
                        SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
-                       SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f",
+                       SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8),
                        phase_name((GCPhase) p), FORMAT_WORDS(_log_effort[p]), FORMAT_WORDS(_log_progress[p]),
                        FORMAT_WORDS(_log_budget[p]), FORMAT_WORDS(_log_authorized[p]), FORMAT_WORDS(_log_allocated[p]),
-                       _log_requests[p], FORMAT_WORDS(_log_words_throttled[p]),
+                       FORMAT_WORDS(allocatable), _log_requests[p], FORMAT_WORDS(_log_words_throttled[p]),
                        FORMAT_WORDS(_log_min_words_throttled[p]), FORMAT_WORDS(_log_max_words_throttled[p]),
                        _log_max_time_throttled[p], _log_total_time_throttled[p],
                        _log_failed[p], FORMAT_WORDS(_log_words_failed[p]), FORMAT_WORDS(_log_min_words_failed[p]),
                        FORMAT_WORDS(_log_max_words_failed[p]),
-                       _log_max_time_failed[p], _log_total_time_failed[p]);
+                       _log_max_time_failed[p], _log_total_time_failed[p], _log_carryovers[p]);
 
     _log_effort[p]       = _not_a_label;
     _log_progress[p]     = 0;
@@ -610,12 +710,15 @@ void ShenandoahThrottler::log_metrics_and_prep_for_next() {
     _log_max_time_throttled[p]   = 0.0;
     _log_total_time_throttled[p] = 0.0;
 
-    _log_failed[p]            = 0;
-    _log_words_failed[p]      = 0;
-    _log_min_words_failed[p]  = SIZE_MAX;
-    _log_max_words_failed[p]  = 0;
-    _log_max_time_failed[p]   = 0.0;
-    _log_total_time_failed[p] = 0.0;
+    _log_failed[p]               = 0;
+    _log_words_failed[p]         = 0;
+    _log_min_words_failed[p]     = SIZE_MAX;
+    _log_max_words_failed[p]     = 0;
+    _log_max_time_failed[p]      = 0.0;
+    _log_total_time_failed[p]    = 0.0;
+
+    _log_allocatable_at_end[p]   = 0;
+    _log_carryovers[p]           = 0;
   }
 }
 
@@ -739,10 +842,10 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
   size_t update_cost;
   bool is_mixed_or_global = is_mixed || is_global;
   if (is_mixed_or_global) {
-    update_cost = (uncollected_young_words + uncollected_old_words) / EVACUATE_VS_UPDATE_FACTOR;
+    update_cost = (size_t) ((uncollected_young_words + uncollected_old_words) / _evacuate_vs_update_factor);
   } else {
-    update_cost = ((uncollected_young_words - promo_in_place_words) / EVACUATE_VS_UPDATE_FACTOR +
-                   (uncollected_old_words + promo_in_place_words) / REMEMBERED_SET_UPDATE_FACTOR);
+    update_cost = (size_t) ((((uncollected_old_words + promo_in_place_words) / REMEMBERED_SET_UPDATE_FACTOR) + 
+                             (uncollected_young_words - promo_in_place_words)) / _evacuate_vs_update_factor);
   }
   
   double evac_fraction_of_total = ((double) evac_cost) / (evac_cost + update_cost);
@@ -789,10 +892,10 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
   // less and throttle allocations later in the update-refs phase a bit more.
   size_t update_cost;
   if (is_mixed_or_global) {
-    update_cost = (uncollected_young_words + uncollected_old_words) / EVACUATE_VS_UPDATE_FACTOR;
+    update_cost = (size_t) ((uncollected_young_words + uncollected_old_words) / _evacuate_vs_update_factor);
   } else {
-    update_cost = ((uncollected_young_words - promo_in_place_words) / EVACUATE_VS_UPDATE_FACTOR +
-                   (uncollected_old_words + promo_in_place_words) / REMEMBERED_SET_UPDATE_FACTOR);
+    update_cost = (size_t) ((((uncollected_old_words + promo_in_place_words) / REMEMBERED_SET_UPDATE_FACTOR) + 
+                             (uncollected_young_words - promo_in_place_words)) / _evacuate_vs_update_factor);
   }
   
   size_t projected_work = update_cost;
@@ -908,24 +1011,6 @@ void ShenandoahThrottler::restart_with(size_t non_taxable_bytes, double tax_rate
 }
 #endif
 
-bool ShenandoahThrottler::claim_for_alloc(intptr_t words, bool force, bool allow_greed) {
-  assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-
-  intptr_t orig_budget, new_budget;
-  do {
-    orig_budget = Atomic::load(&_available_words);
-    if (!allow_greed && (words * 2 > orig_budget)) {
-      // Don't let a very large allocation consume more than half the remaining budget until we have allowed smaller requests
-      return false;
-    } else if (force || (orig_budget - words >= 0)) {
-      new_budget = orig_budget - words;
-    } else {
-      // GC has not yet earned the right to allocate this memory
-      return false;
-    }
-  } while (Atomic::cmpxchg(&_available_words, orig_budget, new_budget, memory_order_relaxed) != orig_budget);
-  return true;
-}
 
 #undef KELVIN_THROTTLE
 
@@ -1029,6 +1114,8 @@ size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
   words = req.size();
   do {
     wait(current_pause);
+    current_epoch = Atomic::load(&_epoch);
+
     if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
       words /= 4;
       if (words < req.min_size()) {
@@ -1044,7 +1131,7 @@ size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
       // Since ShenandoahPacing is mutually exclusive with ShenandoahThrottleAllocations, reuse this field of
       // ShenandoahThreadLocalData
       ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
-      add_to_metrics(true, words, throttle_time);
+      add_to_metrics(true, words, throttle_time, current_epoch - epoch_at_start);
 #ifdef KELVIN_THROTTLE
       size_t new_available =  Atomic::load(&_available_words);
       log_info(gc)("Release thread " PTR_FORMAT ", authorized " SIZE_FORMAT " after delay: %.6f with remnant available: " SIZE_FORMAT,
@@ -1056,7 +1143,6 @@ size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
     if (current_pause > MAX_THROTTLE_DELAY_MS) {
       current_pause = MAX_THROTTLE_DELAY_MS;
     }
-    current_epoch = Atomic::load(&_epoch);
     // normally, we have 4 epochs per GC cycle, but we have an extra epoch when concurrent old marking
   } while (current_epoch - epoch_at_start <= 5);
 
@@ -1068,7 +1154,7 @@ size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
   // Since ShenandoahPacing is mutually exclusive with ShenandoahThrottleAllocations, reuse this field of
   // ShenandoahThreadLocalData
   ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
-  add_to_metrics(false, words, throttle_time);
+  add_to_metrics(false, words, throttle_time, current_epoch - epoch_at_start);
 #ifdef KELVIN_THROTTLE
       log_info(gc)("Forced release throttle for thread " PTR_FORMAT ", allocating " SIZE_FORMAT " after throttle_time: %.6f",
                    p2i(current_thread), words, throttle_time);
