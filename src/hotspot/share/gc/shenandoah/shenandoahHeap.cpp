@@ -704,7 +704,7 @@ ShenandoahHeap::ShenandoahHeap(ShenandoahCollectorPolicy* policy) :
   _phase_carryovers(0),
   _recalibrate_count(0),
   _throttle_queue_length(0),
-  _throttle_queue_words(0),
+  _throttle_queue_min_words(0),
   _phase_label(ShenandoahThrottler::_not_a_label),
   _phase_work(0),
   _phase_budget(0),
@@ -4015,14 +4015,111 @@ void ShenandoahHeap::add_throttle_request_to_queue(ShenandoahThrottledAllocReque
   if (_throttle_queue_head == nullptr) {
     _throttle_queue_head = _throttle_queue_tail = new_request;
     new_request->_next = nullptr;
+    new_request->_prev = nullptr;
     _throttle_queue_length = 1;
-    _throttle_queue_words = new_request->_requested_words;
+    _throttle_queue_min_words = new_request->_requested_words;
   } else {
     _throttle_queue_tail->_next = new_request;
+    new_request->_prev = _throttle_queue_tail;
     _throttle_queue_tail = new_request;
     _throttle_queue_length++;
-    _throttle_queue_words += new_request->_requested_words;
+    _throttle_queue_min_words = MIN2(new_request->_requested_words, _throttle_queue_min_words);
   }
+}
+
+void ShenandoahHeap::remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request) {
+  shenandoah_assert_heaplocked();
+
+  ShenandoahThrottledAllocRequest *predecessor = forced_request->_prev;
+  ShenandoahThrottledAllocRequest *successor = forced_request->_next;
+  if (_throttle_queue_head == forced_request) {
+    _throttle_queue_head = successor;
+  }
+  if (_throttle_queue_tail == forced_request) {
+    _throttle_queue_tail = predecessor;
+  }
+  if (predecessor != nullptr) {
+    predecessor->_next = successor;
+  }
+  if (successor != nullptr) {
+    successor->_prev = predecessor;
+  }
+  _throttle_queue_length--;
+  if (_throttle_queue_length == 0) {
+    _throttle_queue_min_words = 0;
+  }
+  forced_request->_next = nullptr;
+  forced_request->_prev = nullptr;
+}
+
+
+// Distribute newly available memory to throttled threads.  For each thread whose request is granted, remove it from queue.
+// Return the remnant number of words that were not allotted to any queueud throttle requests
+intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_words) {
+  shenandoah_assert_heaplocked();
+
+  ShenandoahThrottledAllocRequest *request, *predecessor, *candidate;
+
+  // Grant memory to as many leading entries on the queue as budget allows
+  while (( available_words > (intptr_t) _throttle_queue_min_words) && 
+         (_throttle_queue_head != nullptr) && ((intptr_t) _throttle_queue_head->_requested_words <= available_words)) {
+    size_t requested_words = _throttle_queue_head->_requested_words;
+    available_words -= requested_words;
+    request = _throttle_queue_head;
+    _throttle_queue_head = request->_next;
+    if (_throttle_queue_head == nullptr) {
+      _throttle_queue_tail = nullptr;
+      _throttle_queue_min_words = 0;
+      _throttle_queue_length = 0;
+    } else {
+      _throttle_queue_head->_prev = nullptr;
+      _throttle_queue_length--;
+    }
+    request->_is_granted = true;
+    request->_next = nullptr;
+    request->_prev = nullptr;
+  }
+
+  candidate = _throttle_queue_head;
+  size_t minimum_request_seen = SIZE_MAX;
+  while ((available_words > (intptr_t) _throttle_queue_min_words) && (candidate != nullptr)) {
+    // See if there are any other pending requests on the queue that can be satisfied even if the leading entries on the
+    // queue may need more memory than what remains of available_words
+
+    while ((candidate != nullptr) && ((intptr_t) candidate->_requested_words > available_words)) {
+      minimum_request_seen = MIN2(candidate->_requested_words, minimum_request_seen);
+      predecessor = candidate;
+      candidate = candidate->_next;
+    }
+
+    while ((available_words > (intptr_t) _throttle_queue_min_words) &&
+           (candidate != nullptr) && ((intptr_t) candidate->_requested_words <= available_words)) {
+      size_t requested_words = candidate->_requested_words;
+      available_words -= requested_words;
+
+      predecessor->_next = candidate->_next;
+      if (predecessor->_next == nullptr) {
+        _throttle_queue_tail = predecessor;
+        _throttle_queue_min_words = 0;
+        _throttle_queue_length = 0;
+      } else {
+        predecessor->_next->_prev = predecessor;
+        _throttle_queue_length--;
+      }
+
+      candidate->_is_granted = true;
+      candidate->_next = nullptr;
+      candidate->_prev = nullptr;
+
+      candidate = predecessor->_next;
+    }
+  }
+
+  if (candidate == nullptr) {
+    // We've examined every element that remains in the queue
+    _throttle_queue_min_words = minimum_request_seen;
+  }
+  return available_words;
 }
 
 void ShenandoahHeap::add_to_throttle_budget(size_t budgeted_words) {
@@ -4154,74 +4251,6 @@ bool ShenandoahHeap::cycle_had_throttles() const {
     }
   }
   return false;
-}
-
-void ShenandoahHeap::remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request) {
-  shenandoah_assert_heaplocked();
-
-  ShenandoahThrottledAllocRequest *predecessor = _throttle_queue_head;
-  while ((predecessor != nullptr) && (predecessor->_next != forced_request)) {
-    predecessor = predecessor->_next;
-  }
-  predecessor->_next = forced_request->_next;
-  forced_request->_next = nullptr;
-
-  _throttle_queue_length--;
-  _throttle_queue_words -= forced_request->_requested_words;
-}
-
-
-// Distribute newly available memory to throttled threads.  For each thread whose request is granted, remove it from queue.
-// Return the remnant number of words that were not allotted to any queueud throttle requests
-intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_words) {
-  shenandoah_assert_heaplocked();
-
-  ShenandoahThrottledAllocRequest *request, *predecessor;
-  while ((_throttle_queue_head != nullptr) && (_throttle_queue_head->_requested_words <= available_words)) {
-    size_t requested_words = _throttle_queue_head->_requested_words;
-    available_words -= requested_words;
-    request = _throttle_queue_head;
-    _throttle_queue_head = request->_next;
-    if (_throttle_queue_head == nullptr) {
-      _throttle_queue_tail = nullptr;
-    }
-
-    request->_is_granted = true;
-    request->_next = nullptr;
-
-    _throttle_queue_length--;
-    _throttle_queue_words -= requested_words;
-  }
-
-  request = _throttle_queue_head;
-  while ((available_words > 0) && (request != nullptr)) {
-    // See if there are any other pending requests on the queue that can be satisfied even if the first entry(ies) on the
-    // queue may need more memory than remaining available_words
-
-    while ((request != nullptr) && (request->_requested_words > available_words)) {
-      predecessor = request;
-      request = request->_next;
-    }
-
-    while ((request != nullptr) && (request->_requested_words <= available_words)) {
-      size_t requested_words = request->_requested_words;
-      available_words -= requested_words;
-
-      predecessor->_next = request->_next;
-      if (predecessor->_next == nullptr) {
-        _throttle_queue_tail = predecessor;
-      }
-
-      request->_is_granted = true;
-      request->_next = nullptr;
-
-      _throttle_queue_length--;
-      _throttle_queue_words -= requested_words;
-
-      request = predecessor->_next;
-    }
-  }
-  return available_words;
 }
 
 #ifdef ASSERT

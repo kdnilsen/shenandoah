@@ -93,19 +93,20 @@ class VMStructs;
 typedef uint16_t ShenandoahLiveData;
 #define SHENANDOAH_LIVEDATA_MAX ((ShenandoahLiveData)-1)
 
-struct throttled_alloc_req {
-  struct throttled_alloc_req *_next;       // Other throttled requests on the queue
-  JavaThread* _current_thread;             // What is my thread id?
-  double _start_throttle_time;             // When did throttle request begin?
-  double _end_throttle_time;               // When was throttle request granted?
+struct shenandoah_throttled_alloc_req {
+  struct shenandoah_throttled_alloc_req *_prev;  // Previous throttled requests on the queue
+  struct shenandoah_throttled_alloc_req *_next;  // Next throttled requests on the queue
+  JavaThread* _current_thread;                   // What is my thread id?
+  double _start_throttle_time;                   // When did throttle request begin?
+  double _end_throttle_time;                     // When was throttle request granted?
   intptr_t _epoch_at_start;
-  intptr_t _requested_words;               // How many words are requested?
-  bool _is_granted;                        // True when release can be granted
-  bool _force_claim;                       // True if we need to force a claim that was not granted after too long of a delay
-  bool _is_politely_deferred;              // True if this large alloc request is stepping aside so smaller requests can proceed
+  size_t _requested_words;                       // How many words are requested?
+  bool _is_granted;                              // True when release can be granted
+  bool _force_claim;                             // True if we need to force a claim that was not granted after too long of a delay
+  bool _is_politely_deferred;                    // True if this alloc request is stepping aside so smaller requests can proceed
 };
 
-typedef struct throttled_alloc_req ShenandoahThrottledAllocRequest;
+typedef struct shenandoah_throttled_alloc_req ShenandoahThrottledAllocRequest;
 
 class ShenandoahRegionIterator : public StackObj {
 private:
@@ -967,7 +968,7 @@ private:
   size_t _recalibrate_count;
 
   size_t _throttle_queue_length;
-  size_t _throttle_queue_words;
+  size_t _throttle_queue_min_words; // all throttled requests on the queue request no fewer words than this
 
   // set and read once per phase, by control thread.
   ShenandoahThrottler::GCPhase _phase_label;
