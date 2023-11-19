@@ -93,7 +93,7 @@ inline void ShenandoahThrottler::report_internal(size_t words_of_completed_work)
 
   // Did I move progress across a budget threshold?
   size_t supplement = 0;
-  for (uintx i = 0; i < _GCPhase_Count; i++) {
+  for (uintx i = 0; i < _Microphase_Count; i++) {
     if ((orig_progress < _work_completed[i]) && (new_progress >= _work_completed[i])) {
       supplement += _budget_supplement[i];
     }
