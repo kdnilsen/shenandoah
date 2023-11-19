@@ -70,28 +70,8 @@ inline void ShenandoahPacer::add_budget(size_t words) {
   }
 }
 
-// Don't allow any allocation to make the budget negative, unless force.
-// Don't let a very large allocation consume more than half the remaining budget unless allow_greed
-//  If a thread wants more than half of remaining budget, we'll throttle it at least once so that
-//  multiple less greedy threads have a chance to proceed before memory is granted to this thread.
-inline bool ShenandoahThrottler::claim_for_alloc(intptr_t words, bool force, bool allow_greed) {
-  assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-  // Assume this allocation does not need to be throttled.
-  // Fast path is one atomic sub for each allocation request.
-  intptr_t new_budget = Atomic::sub(&_available_words, words, memory_order_relaxed);
-  if (((new_budget < 0) && !force) || ((new_budget < words) && !allow_greed)) {
-    // Oops!  We took too much.  Give it back.
-    Atomic::add(&_available_words, words, memory_order_relaxed);
-    return false;
-  }
-  return true;
-}
-
 inline void ShenandoahThrottler::report_mark(size_t words) {
   report_internal(words);
-#ifdef KELVIN_DEPRECATE
-  report_progress_internal(words);
-#endif
 }
 
 inline void ShenandoahThrottler::report_evac(size_t words) {
@@ -103,30 +83,8 @@ inline void ShenandoahThrottler::report_updaterefs(size_t words) {
   report_internal(scaled);
 }
 
-inline void ShenandoahThrottler::report_alloc(size_t words) {
-  report_internal(words);
-}
-
-inline void ShenandoahThrottler::report_internal(size_t words) {
+inline void ShenandoahThrottler::report_internal(size_t words_of_completed_work) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
-  add_budget(words);
-}
-
-#ifdef KELVIN_DEPRECATE
-// ShenandoahPacer handled mark phase differently than other phases.
-// ShenandoahThrottler handls all the same.
-inline void ShenandoahThrottler::report_progress_internal(size_t words) {
-  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
-  STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
-  Atomic::add(&_progress, (intptr_t)words, memory_order_relaxed);
-}
-#endif
-
-inline void ShenandoahThrottler::wake_throttled() {
-  _need_notify_waiters.try_set();
-}
-
-inline void ShenandoahThrottler::add_budget(size_t words_of_completed_work) {
   size_t orig_progress, new_progress;
   do {
     orig_progress = Atomic::load(&_progress);
@@ -141,21 +99,10 @@ inline void ShenandoahThrottler::add_budget(size_t words_of_completed_work) {
     }
   }
 
+  // If we moved across a budget threshold, augment the budget.
   if (supplement > 0) {
     STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
-    intptr_t inc = supplement;
-    // If we moved across a budget threshold, augment the budget.
-    Atomic::add(&_available_words, inc, memory_order_relaxed);
-    Atomic::add(&_phase_authorized, supplement, memory_order_relaxed);
-#undef KELVIN_MONITOR
-#ifdef KELVIN_MONITOR
-    log_info(gc, ergo)("Upon completion of work: " SIZE_FORMAT ", allocation budget is augmented by: " SIZE_FORMAT,
-                       new_progress, supplement);
-#endif
-    // Notify unconditionally.  Don't second guess whether there are threads waiting in throttling requests. Threads
-    // can be waiting even if original_budget was > 0 because very large requests may be forced to delay even when
-    // budget is sufficient and smaller requests will delay if budget is positive but insufficient.
-    wake_throttled();
+    _heap->add_to_throttle_budget(supplement);
   }
 }
 

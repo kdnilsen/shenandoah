@@ -359,308 +359,22 @@ const uintx ShenandoahThrottler::PROMOTE_IN_PLACE_FACTOR = 16;
 // TODO: make this adaptive.
 const uintx ShenandoahThrottler::REMEMBERED_SET_UPDATE_FACTOR = 8;
 
-
-const uintx ShenandoahThrottler::MAX_THROTTLE_DELAY_MS = 128;
-const uintx ShenandoahThrottler::MIN_THROTTLE_DELAY_MS = 2;
-
 ShenandoahThrottler::ShenandoahThrottler(ShenandoahHeap* heap) :
     _heap(heap),
     _is_generational(heap->mode()->is_generational()),
-    _wait_monitor(new Monitor(Mutex::safepoint-1, "ShenandoahWaitMonitor_lock", true)),
     _evacuate_vs_update_factor(INITIAL_EVACUATE_VS_UPDATE_FACTOR),
-    _recalibrate_count(0),
-    _phase_label(_not_a_label),
-    _most_recent_live_young_words(0),
-    _most_recent_live_global_words(0),
-    _epoch(0),
 #ifdef KELVIN_THROTTLES
     _threads_in_throttle(0),
 #endif
+    _most_recent_live_young_words(0),
+    _most_recent_live_global_words(0),
     _progress(0) {
-
-  for (int p = _idle; p < _GCPhase_Count; p++) {
-    _log_effort[p]       = _not_a_label;
-    _log_progress[p]     = 0;
-    _log_budget[p]       = 0;
-    _log_authorized[p]   = 0;
-    _log_allocated[p]    = 0;
-
-    _log_requests[p]             = 0;
-    _log_words_throttled[p]      = 0;
-    _log_min_words_throttled[p]  = SIZE_MAX;
-    _log_max_words_throttled[p]  = 0;
-    _log_max_time_throttled[p]   = 0.0;
-    _log_total_time_throttled[p] = 0.0;
-  
-    _log_failed[p]               = 0;
-    _log_words_failed[p]         = 0;
-    _log_min_words_failed[p]     = SIZE_MAX;
-    _log_max_words_failed[p]     = 0;
-    _log_max_time_failed[p]      = 0.0;
-    _log_total_time_failed[p]    = 0.0;
-
-    _log_allocatable_at_end[p]   = 0;
-  }
 }
 
-
-void ShenandoahThrottler::add_to_metrics(bool successful, size_t words, double delay, size_t phase_delta) {
-  size_t old_val, new_val;
-  double old_dv, new_dv;
-
-  // We do not distinguish between multiple throttles that spanned one phase, vs, a single throttle that spanned multiple phases.
-  if (phase_delta > 0) {
-    Atomic::add(&_phase_carryovers, phase_delta, memory_order_relaxed);
-  }
-  if (successful) {
-    Atomic::inc(&_allocation_requests_throttled);
-    // _total_words_throttled
-    do {
-      old_val = Atomic::load(&_total_words_throttled);
-      new_val = old_val + words;
-    } while (Atomic::cmpxchg(&_total_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _max_words_throttled
-    do {
-      old_val = Atomic::load(&_max_words_throttled);
-      if (old_val > words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_max_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _min_words_throttled
-    do {
-      old_val = Atomic::load(&_min_words_throttled);
-      if (old_val < words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_min_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _max_time_throttled
-    do {
-      old_dv = Atomic::load(&_max_time_throttled);
-      if (old_dv > delay) {
-        break;
-      }
-      new_dv = delay;
-    } while (Atomic::cmpxchg(&_max_time_throttled, old_dv, new_dv, memory_order_relaxed) != old_dv);
-
-    // _total_time_throttled
-    do {
-      old_dv = Atomic::load(&_total_time_throttled);
-      new_dv = old_dv + delay;;
-    } while (Atomic::cmpxchg(&_total_time_throttled, old_dv, new_dv, memory_order_relaxed) != old_dv);
-
-  } else {
-    Atomic::inc(&_allocation_requests_failed);
-
-    // _total_words_failed_to_throttle
-    do {
-      old_val = Atomic::load(&_total_words_failed);
-      new_val = old_val + words;
-    } while (Atomic::cmpxchg(&_total_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _max_time_throttled_per_failed_allocation
-    do {
-      old_dv = Atomic::load(&_max_time_failed);
-      if (old_dv > delay) {
-        break;
-      }
-      new_dv = delay;
-    } while (Atomic::cmpxchg(&_max_time_failed, old_dv, new_dv, memory_order_relaxed) != old_dv);
-
-    // _max_words_failed
-    do {
-      old_val = Atomic::load(&_max_words_failed);
-      if (old_val > words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_max_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _min_words_failed
-    do {
-      old_val = Atomic::load(&_min_words_failed);
-      if (old_val < words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_min_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
-
-
-    // _total_time_failed
-    do {
-      old_dv = Atomic::load(&_total_time_failed);
-      new_dv = old_dv + delay;;
-    } while (Atomic::cmpxchg(&_total_time_failed, old_dv, new_dv, memory_order_relaxed) != old_dv);
-  }
+void ShenandoahThrottler::publish_metrics_and_increment_epoch() {
+  // Accumulations deal with multiple Idle phases.
+  _heap->absorb_throttle_metrics_and_increment_epoch(_progress);
 }
-
-bool ShenandoahThrottler::cycle_had_throttles() const {
-  for (int p = _idle; p < _GCPhase_Count; ++p) {
-    if ((_log_requests[p] > 0) || (_log_failed[p] > 0)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void ShenandoahThrottler::reset_metrics(GCPhase id, size_t planned_work, size_t budget, size_t initial_authorization) {
-  _phase_label = id;
-  _phase_work = planned_work;
-  _phase_budget = budget;
-  _phase_authorized = initial_authorization;
-  
-  _allocation_requests_throttled = 0;
-  _total_words_throttled = 0;
-  _min_words_throttled = SIZE_MAX;
-  _max_words_throttled = 0;
-  _max_time_throttled = 0.0;
-
-  _allocation_requests_failed = 0;
-  _total_words_failed = 0;
-  _min_words_failed = SIZE_MAX;
-  _max_words_failed = 0.0;
-  _max_time_failed = 0.0;
-
-  _total_time_throttled = 0.0;
-  _total_time_failed = 0.0;
-
-  _phase_carryovers = 0;
-}
-
-void ShenandoahThrottler::publish_metrics() {
-  if (_phase_label != _not_a_label) {
-    // Accumulations deal with multiple Idle phases.
-
-    size_t allocated;
-    if (_phase_label == _idle) {
-      allocated = 2 * _phase_authorized - _available_words;
-    } else {
-      allocated = _phase_authorized - _available_words;
-    }
-
-    _log_effort[_phase_label]      += _phase_work;
-    _log_progress[_phase_label]    += _progress;
-    _log_budget[_phase_label]       = MAX2(_phase_budget, _log_budget[_phase_label]);
-    _log_authorized[_phase_label]   = MAX2(_phase_authorized, _log_authorized[_phase_label]);
-    _log_allocated[_phase_label]   += allocated;
-
-    _log_requests[_phase_label]             += _allocation_requests_throttled;
-    _log_words_throttled[_phase_label]      += _total_words_throttled;
-    _log_min_words_throttled[_phase_label]   = MIN2(_min_words_throttled, _log_min_words_throttled[_phase_label]);
-    _log_max_words_throttled[_phase_label]   = MAX2(_max_words_throttled, _log_max_words_throttled[_phase_label]);
-    _log_max_time_throttled[_phase_label]    = MAX2(_max_time_throttled, _log_max_time_throttled[_phase_label]);
-    _log_total_time_throttled[_phase_label] += _total_time_throttled;
-
-    _log_failed[_phase_label]            += _allocation_requests_failed;
-    _log_words_failed[_phase_label]      += _total_words_failed;
-    _log_min_words_failed[_phase_label]   = MIN2(_min_words_failed, _log_min_words_failed[_phase_label]);
-    _log_max_words_failed[_phase_label]   = MAX2(_max_words_failed, _log_max_words_failed[_phase_label]);
-    _log_max_time_failed[_phase_label]    = MAX2(_max_time_failed, _log_max_time_failed[_phase_label]);
-    _log_total_time_failed[_phase_label] += _total_time_failed;
-
-    _log_allocatable_at_end[_phase_label] = MAX2(_available_words, _log_allocatable_at_end[_phase_label]);
-
-    _log_carryovers[_phase_label]        += _phase_carryovers;
-
-    if (_phase_label == _update) {
-      double evac_update_factor = _evacuate_vs_update_factor;
-      recalibrate_phase_efforts();
-      log_metrics_and_prep_for_next(evac_update_factor);
-    }
-  }
-  // else, this is the start of very first phase, and there is no prior phase to be reported
-}
-
-// Every 16 cycles, check whether the proportions between phase budgets are appropriate
-static const int RECALIBRATE_PERIOD = 16;
-
-void ShenandoahThrottler::recalibrate_phase_efforts() {
-  for (int p = _idle; p < _GCPhase_Count; p++) {
-    _available_sum[p] += _log_allocatable_at_end[p];
-    size_t reqs_stalled = _log_requests[p] + _log_failed[p];
-    size_t words_stalled = _log_words_throttled[p] + _log_words_failed[p];
-
-    if ((_log_carryovers[p] > 0) && (p > _idle)) {
-      // Assume all carryovers originated in preceding phase (though they could have originated multiple phases back)
-      _requests_stalled_sum[p] = reqs_stalled - _log_carryovers[p];
-      _requests_stalled_sum[p-1] += _log_carryovers[p];
-      size_t words_per_req = words_stalled / reqs_stalled;
-      size_t carryover_words = _log_carryovers[p] * words_per_req;
-      _words_stalled_sum[p-1] += carryover_words;
-      _words_stalled_sum[p] = words_stalled - carryover_words;
-    } else if (_log_carryovers[p] > 0) {
-      // We'll count carryovers into idle as if they originated during update-refs
-      _requests_stalled_sum[p] = reqs_stalled - _log_carryovers[p];
-      _requests_stalled_sum[_update] += _log_carryovers[p];
-      size_t words_per_req = words_stalled / reqs_stalled;
-      size_t carryover_words = _log_carryovers[p] * words_per_req;
-      _words_stalled_sum[_update] += carryover_words;
-      _words_stalled_sum[p] = words_stalled - carryover_words;
-    } else {
-      _words_stalled_sum[p] += words_stalled;
-      _requests_stalled_sum[p] += reqs_stalled;
-    }
-  }
-
-  if (++_recalibrate_count >= RECALIBRATE_PERIOD) {
-    if (_words_stalled_sum[_update] > _words_stalled_sum[_evac]) {
-      if (_words_stalled_sum[_evac] / (double) _words_stalled_sum[_update] < 0.50) {
-        // _update needs a larger budget
-        _evacuate_vs_update_factor *= 0.9;;
-      }
-    } else if (_words_stalled_sum[_update] < _words_stalled_sum[_evac]) {
-      if (_words_stalled_sum[_update] / (double) _words_stalled_sum[_evac] < 0.50) {
-        // _evac needs a larger budget
-        _evacuate_vs_update_factor *= 1.1;
-      }
-    } else {
-      // else, we stalled the same in each (probably zero).  Use remaining allocatable to guide recalibration.
-      if (_available_sum[_update] > _available_sum[_evac]) {
-        if ((_available_sum[_evac] >= 0) && ((_available_sum[_evac] / (double) _available_sum[_update]) < 0.50)) {
-          // _evac needs a larger budget
-          _evacuate_vs_update_factor *= 1.1;
-        } else if ((_available_sum[_update] > 0) && (_available_sum[_evac] < 0)) {
-          // evac needs a larger budget
-          _evacuate_vs_update_factor *= 1.1;
-        }
-        // else, leave budgets as is:
-        //  1. _available_sum[update] <= 0: so both are negative
-        //  2. or, _available_sum[evac] >= 0: so both are positive (but ratio does not justify change)
-      } else if (_available_sum[_update] < _available_sum[_evac]) {
-        if ((_available_sum[_update] >= 0) && ((_available_sum[_update] / (double) _available_sum[_evac]) < 0.50)) {
-          // _update needs a larger budget
-          _evacuate_vs_update_factor *= 0.9;
-        } else if ((_available_sum[_evac] > 0) && (_available_sum[_update] < 0)) {
-          // _update needs a larger budget
-          _evacuate_vs_update_factor *= 0.9;
-        }
-        // else, leave budgets as is:
-        //  1. _available_sum[evac <= 0: so both are negative
-        //  2. or, _available_sum[update] >= 0: so both are positive (but ratio does not justify change)
-      }
-      // else, let the status quo remain.
-
-    }
-#define KELVIN_RECALIBRATE
-#ifdef KELVIN_RECALIBRATE
-    log_info(gc)("KELVIN recalibrate to %.3f based on _stalled[evac] " SIZE_FORMAT ", stalled[update]: " SIZE_FORMAT
-                 ", aval[eva]: " SIZE_FORMAT ", avail[update]: " SIZE_FORMAT, _evacuate_vs_update_factor,
-                 _words_stalled_sum[_update], _words_stalled_sum[_evac], _available_sum[_update], _available_sum[_evac]);
-#endif
-    for (int p = _idle; p < _GCPhase_Count; p++) {
-      _requests_stalled_sum[p] = 0;
-      _words_stalled_sum[p] = 0;
-      _available_sum[p] = 0;
-    }
-    _recalibrate_count = 0;
-  }
-}
-
-
 
 const char* ShenandoahThrottler::phase_name(GCPhase p) {
   switch (p) {
@@ -673,59 +387,9 @@ const char* ShenandoahThrottler::phase_name(GCPhase p) {
   }
 }
 
-#define FORMAT_WORDS(x)  byte_size_in_proper_unit(((x) == (SIZE_MAX))? 0: (x) << LogHeapWordSize), \
-                         proper_unit_for_byte_size(((x) == (SIZE_MAX))? 0: (x) << LogHeapWordSize)
-
-void ShenandoahThrottler::log_metrics_and_prep_for_next(double evac_update_factor) {
-  log_info(gc, ergo)("Throttle report (evac vs update factor: %.3f)", evac_update_factor);
-  log_info(gc, ergo)("%6s  %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %11s %11s %8s %8s %8s %8s %11s %11s %8s",
-                     "Phase", "Effort", "Progress", "Budget", "Alloted", "Alloced", "Avail", "GoodReqs", "Bytes", "Min", "Max",
-                     "MaxTime", "TotTime", "BadReqs", "Bytes", "Min", "Max", "MaxTime", "TotTime", "Overflow");
-  for (int p = _idle; p <= _update; p++) {
-    size_t allocatable = (size_t) _log_allocatable_at_end[p];
-    log_info(gc, ergo)("%6s: " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
-                       SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s "
-                       SIZE_FORMAT_W(7) "%s "
-                       SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
-                       SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8),
-                       phase_name((GCPhase) p), FORMAT_WORDS(_log_effort[p]), FORMAT_WORDS(_log_progress[p]),
-                       FORMAT_WORDS(_log_budget[p]), FORMAT_WORDS(_log_authorized[p]), FORMAT_WORDS(_log_allocated[p]),
-                       FORMAT_WORDS(allocatable), _log_requests[p], FORMAT_WORDS(_log_words_throttled[p]),
-                       FORMAT_WORDS(_log_min_words_throttled[p]), FORMAT_WORDS(_log_max_words_throttled[p]),
-                       _log_max_time_throttled[p], _log_total_time_throttled[p],
-                       _log_failed[p], FORMAT_WORDS(_log_words_failed[p]), FORMAT_WORDS(_log_min_words_failed[p]),
-                       FORMAT_WORDS(_log_max_words_failed[p]),
-                       _log_max_time_failed[p], _log_total_time_failed[p], _log_carryovers[p]);
-
-    _log_effort[p]       = _not_a_label;
-    _log_progress[p]     = 0;
-    _log_budget[p]       = 0;
-    _log_authorized[p]   = 0;
-    _log_allocated[p]    = 0;
-
-    _log_requests[p]             = 0;
-    _log_words_throttled[p]      = 0;
-    _log_min_words_throttled[p]  = SIZE_MAX;
-    _log_max_words_throttled[p]  = 0;
-    _log_max_time_throttled[p]   = 0.0;
-    _log_total_time_throttled[p] = 0.0;
-
-    _log_failed[p]               = 0;
-    _log_words_failed[p]         = 0;
-    _log_min_words_failed[p]     = SIZE_MAX;
-    _log_max_words_failed[p]     = 0;
-    _log_max_time_failed[p]      = 0.0;
-    _log_total_time_failed[p]    = 0.0;
-
-    _log_allocatable_at_end[p]   = 0;
-    _log_carryovers[p]           = 0;
-  }
-}
-
 void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when allocation throttling is enabled");
-  publish_metrics();
-  Atomic::inc(&_epoch);
+  publish_metrics_and_increment_epoch();
 
   // During marking, work progress is represented by total words marked.  Accumulation of marked words during marking
   // is not linear.  During the initial stages of marking, almost every object seen has not yet been marked.  During
@@ -736,7 +400,6 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
   //
   // Bottom line: our configuration of pacing during concurrent mark favors greedy behavior.  We strive not to stall
   // allocators unless we are in "dire straits".
-
   size_t projected_work;
   if (is_global) {
     size_t global_used = ShenandoahHeap::heap()->global_generation()->used() >> LogHeapWordSize;
@@ -785,22 +448,15 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
   _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget = 0.875 * phase_budget
   _budget_supplement[_third_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget = 1.0 * phase_budget
 
-#ifdef KELVIN_DEPRECATE
-  Atomic::store(&_authorized_allocations, initial_budget);
-  Atomic::store(&_allocated, (size_t) 0L);
-#endif
-  Atomic::store(&_available_words, initial_budget);
   Atomic::store(&_progress, (size_t) 0L);
-  reset_metrics(_mark, projected_work, phase_budget, initial_budget);
-  wake_throttled();
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_mark, initial_budget, phase_budget, projected_work);
 }
 
 void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words,
                                          size_t uncollected_young_words, size_t uncollected_old_words,
                                          bool is_mixed, bool is_global, bool is_bootstrap) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
-  publish_metrics();
-  Atomic::inc(&_epoch);
+  publish_metrics_and_increment_epoch();
 
   // Note that promo_in_place words are initially part of uncollected_young_words, but they end up as uncollected_old_words
   //
@@ -864,22 +520,15 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
   _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget = 0.875 * phase_budget
   _budget_supplement[_third_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget = 1.0 * phase_budget
 
-#ifdef KELVIN_DEPRECATE
-  Atomic::store(&_authorized_allocations, initial_budget);
-  Atomic::store(&_allocated, (size_t) 0);
-#endif
-  Atomic::store(&_available_words, (intptr_t) initial_budget);
   Atomic::store(&_progress, (size_t) 0L);
-  reset_metrics(_evac, projected_work, phase_budget, initial_budget);
-  wake_throttled();
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_evac, initial_budget, phase_budget, projected_work);
 }
 
 void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t promo_in_place_words,
                                                size_t uncollected_young_words, size_t uncollected_old_words,
                                                bool is_mixed_or_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-  publish_metrics();
-  Atomic::inc(&_epoch);
+  publish_metrics_and_increment_epoch();
 
   // We use uncollected words to estimate the update-refs effort.  We are consistent between budgeting (here) and
   // reporting, as update-refs work is completed.  A more accurate estimate would be uncollected-words below
@@ -913,14 +562,8 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
   _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget = 0.875 * phase_budget
   _budget_supplement[_third_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget = 1.0 * phase_budget
 
-#ifdef KELVIN_DEPRECATE
-  Atomic::store(&_authorized_allocations, initial_budget);
-  Atomic::store(&_allocated, (size_t) 0);
-#endif
-  Atomic::store(&_available_words, (intptr_t) initial_budget);
   Atomic::store(&_progress, (size_t) 0L);
-  reset_metrics(_update, projected_work, phase_budget, initial_budget);
-  wake_throttled();
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_update, initial_budget, phase_budget, projected_work);
 }
 
 /* This allocatable should be the headroom (available minus (allocation spike plus penalties).  In theory, the
@@ -931,8 +574,7 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
  */
 void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-  publish_metrics();
-  Atomic::inc(&_epoch);
+  publish_metrics_and_increment_epoch();
   
   assert(_Microphase_Count == _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
@@ -947,11 +589,8 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
   _budget_supplement[_third_microphase] = (size_t) 0;
 
   // We don't want throttles during Idle, so we double available
-  Atomic::store(&_available_words, (intptr_t) allocatable_words * 2);
   Atomic::store(&_progress, (size_t) 0L);
-
-  reset_metrics(_idle, 0, allocatable_words, allocatable_words);
-  wake_throttled();
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_mark, allocatable_words * 2, allocatable_words * 2, 0);
 }
 
 /*
@@ -960,8 +599,7 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
  */
 void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-  publish_metrics();
-  Atomic::inc(&_epoch);
+  publish_metrics_and_increment_epoch();
 
   assert(_Microphase_Count == _third_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
@@ -975,210 +613,10 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   _budget_supplement[_second_microphase] = (size_t) 0;
   _budget_supplement[_third_microphase] = (size_t) 0;
 
-#ifdef KELVIN_DEPRECATE
-  Atomic::store(&_authorized_allocations, allocatable_words);
-  Atomic::store(&_allocated, (size_t) 0);
-#endif
-  Atomic::store(&_available_words, (intptr_t) allocatable_words);
   Atomic::store(&_progress, (size_t) 0L);
-  reset_metrics(_reset, 0, allocatable_words, allocatable_words);
-  wake_throttled();
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_mark, allocatable_words, allocatable_words, 0);
 }
 
-#ifdef KELVIN_DOES_NOT_NEED
-size_t ShenandoahThrottler::update_and_get_progress_history() {
-  if (_progress == -1) {
-    // First initialization, report some prior
-    Atomic::store(&_progress, (intptr_t)PACING_PROGRESS_ZERO);
-    return (size_t) (_heap->max_capacity() * 0.1);
-  } else {
-    // Record history, and reply historical data
-    _progress_history->add(_progress);
-    Atomic::store(&_progress, (intptr_t)PACING_PROGRESS_ZERO);
-    return (size_t) (_progress_history->avg() * HeapWordSize);
-  }
-}
-
-void ShenandoahThrottler::restart_with(size_t non_taxable_bytes, double tax_rate) {
-  size_t initial = (size_t)(non_taxable_bytes * tax_rate) >> LogHeapWordSize;
-  STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
-  Atomic::xchg(&_budget, (intptr_t)initial, memory_order_relaxed);
-  Atomic::store(&_tax_rate, tax_rate);
-  Atomic::inc(&_epoch);
-
-  // Shake up stalled waiters after budget update.
-  _need_notify_waiters.try_set();
-}
-#endif
-
-
-#undef KELVIN_THROTTLE
-
-// We unthrottle when an authorized allocation consumes less than was authorized.
-void ShenandoahThrottler::unthrottle_for_alloc(intptr_t epoch, size_t words) {
-  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
-
-  if (Atomic::load(&_epoch) != epoch) {
-    // Stale ticket, no need to unpace.
-    return;
-  }
-
-#ifdef KELVIN_THROTTLE
-  JavaThread* current_thread = JavaThread::current();
-  log_info(gc)("Unthrottle " PTR_FORMAT " for words: " SIZE_FORMAT, p2i(current_thread), words);
-#endif
-  intptr_t old_budget, new_budget;
-  do {
-    old_budget = Atomic::load(&_available_words);
-    new_budget = old_budget + words;
-  } while (Atomic::cmpxchg(&_available_words, old_budget, new_budget, memory_order_relaxed) != old_budget);
-
-  // Notify unconditionally.  Don't second guess whether there are threads waiting in throttling requests. Threads
-  // can be waiting even if original_budget was > 0 because very large requests may be forced to delay even when
-  // budget is sufficient and smaller requests will delay if budget is positive but insufficient.
-
-  // Let's not notify here to reduce thrashing and kernel service overhead.  The amount of memory returned by unthrottle
-  // is usually relatively small.  Waiting threads will awaken at the end of their most recent sleep span, and they will
-  // be notified at the start of the next phase.
-
-  // wake_throttled();
-}
-
-intptr_t ShenandoahThrottler::epoch() {
-  return Atomic::load(&_epoch);
-}
-
-// Return the number of words for which allocation has been authorized.  If this is a TLAB request and we are configured
-// for elastic TLABS and we cannot immediately claim authorization for the request, downsize to 1/8 requested size, or
-// minimum TLAB size, whichever is larger.
-
-// In case we cannot get authorization for words after waiting through an entire epoch, we force the authorization.
-// Of course, the forced authorization may result in an allocation failure, which may ultimately degenerate.
-size_t ShenandoahThrottler::throttle_for_alloc(ShenandoahAllocRequest req) {
-  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
-  size_t words = req.size();
-  // Fast path: try to allocate right away
-  if ( claim_for_alloc(words, false)) {
-    return words;
-  }
-
-  // Threads that are attaching should not block at all: they are not fully initialized yet. Blocking them would be awkward.
-  // This is probably the path that allocates the thread oop itself.
-  //
-  // Thread which is not an active Java thread should also not block. This can happen during VM init when main thread is
-  // still not an active Java thread.
-  JavaThread* current_thread = JavaThread::current();
-  if (current_thread->is_attaching_via_jni() || !current_thread->is_active_Java_thread()) {
-    if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
-      // Since we're in a throttling situation, make our TLAB request more conservative
-      words = req.min_size();
-    }
-    bool claimed = claim_for_alloc(words, true);
-    assert(claimed, "Forceful claim should always succeed");
-    return words;
-  }
-
-  // ShenandoahPacer forces a FIFO ordering of requests.  It claims authorization for allocate immediately
-  // and then it stalls until the authorization budget is no longer negative.  Some issues with that approach:
-  //
-  //  1. It penalizes all threads equally.  The light allocators pay the same prices as the heavy allocators.
-  //  2. The light allocators may be blocked in their progress because a heavy allocator inserted its request ahead of theirs.
-  //  3. Once we have deficit spending in the budget, all allocating threads must wait for the deficit to be resolved.
-  //     There is no mechanism to say "my deficit has been resolved so I should be allowed to move on."
-  //
-  // On the other hand, ShenandoahPacer limits the total time that any thread will stall on each allocation request,
-  // except that this limit is only artificial, because if ShenandoahPacer releases a thread before it's allocation
-  // deficit has been paid, we are very likely to end up in degeneration, and then everyone pays much higher stall costs.
-  //
-  // The mechanism implemented by ShenandoahThrottleAllocation may be vulnerable to priority inversion.  We prioritize
-  // allocations to the threads that have lower allocation needs, and these may not be the most "important" threads.
-  //
-  // But this is inherent in Java.  There is no notion of "importance" or "urgency" represented in thread state.
-  //
-  // Thus, we bias for "productivity".  If there are any threads that can do productive work within the context of our
-  // current shortfall of available memory, we let these threads run.  To the extent that these threads get work done now,
-  // this will reduce contention with the other threads that are currently waiting for availability of memory.
-
-  double start_time = os::elapsedTime();
-  intptr_t epoch_at_start = Atomic::load(&_epoch);
-  intptr_t current_epoch;
-  size_t cumulative_pause = 0;
-  size_t current_pause = MIN_THROTTLE_DELAY_MS;
-
-
-#ifdef KELVIN_THROTTLE
-  size_t available =  Atomic::load(&_available_words);
-  log_info(gc)("Throttle " PTR_FORMAT " for %s req, size: " SIZE_FORMAT " out of " SIZE_FORMAT " (epoch: %ld)",
-               p2i(current_thread), req.is_lab_alloc()? "tlab": "shared", req.size(), available, epoch_at_start);
-#endif
-  words = req.size();
-  do {
-    wait(current_pause);
-    current_epoch = Atomic::load(&_epoch);
-
-    if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
-      words /= 4;
-      if (words < req.min_size()) {
-        words = req.min_size();
-      }
-    }
-    // Since we've waited at least current_pause ms, we can allow greed in large allocation requests
-    bool claimed = claim_for_alloc(words, false, true);
-    if (claimed) {
-      double end_time = os::elapsedTime();
-      double throttle_time = end_time - start_time;
-
-      // Since ShenandoahPacing is mutually exclusive with ShenandoahThrottleAllocations, reuse this field of
-      // ShenandoahThreadLocalData
-      ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
-      add_to_metrics(true, words, throttle_time, current_epoch - epoch_at_start);
-#ifdef KELVIN_THROTTLE
-      size_t new_available =  Atomic::load(&_available_words);
-      log_info(gc)("Release thread " PTR_FORMAT ", authorized " SIZE_FORMAT " after delay: %.6f with remnant available: " SIZE_FORMAT,
-                   p2i(current_thread), words, throttle_time, new_available);
-#endif
-      return words;
-    }
-    current_pause *= 2;
-    if (current_pause > MAX_THROTTLE_DELAY_MS) {
-      current_pause = MAX_THROTTLE_DELAY_MS;
-    }
-    // normally, we have 4 epochs per GC cycle, but we have an extra epoch when concurrent old marking
-  } while (current_epoch - epoch_at_start <= 5);
-
-  // Force the authorization, which may result in allocation failure and degeneration.
-  claim_for_alloc(words, true);
-  double end_time = os::elapsedTime();
-  double throttle_time = end_time - start_time;
-
-  // Since ShenandoahPacing is mutually exclusive with ShenandoahThrottleAllocations, reuse this field of
-  // ShenandoahThreadLocalData
-  ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
-  add_to_metrics(false, words, throttle_time, current_epoch - epoch_at_start);
-#ifdef KELVIN_THROTTLE
-      log_info(gc)("Forced release throttle for thread " PTR_FORMAT ", allocating " SIZE_FORMAT " after throttle_time: %.6f",
-                   p2i(current_thread), words, throttle_time);
-#endif
-  return words;
-}
-
-void ShenandoahThrottler::wait(size_t time_ms) {
-  // Perform timed wait. It works like like sleep(), except without modifying
-  // the thread interruptible status. MonitorLocker also checks for safepoints.
-  assert(time_ms > 0, "Should not call this with zero argument, as it would stall until notify");
-  assert(time_ms <= LONG_MAX, "Sanity");
-//   Atomic::inc(&_threads_in_throttle, memory_order_relaxed);
-  MonitorLocker locker(_wait_monitor);
-  _wait_monitor->wait((long)time_ms);
-//  Atomic::dec(&_threads_in_throttle, memory_order_relaxed);
-}
-
-void ShenandoahThrottler::notify_waiters() {
-  if (_need_notify_waiters.try_unset()) {
-    MonitorLocker locker(_wait_monitor);
-    _wait_monitor->notify_all();
-  }
-}
 
 #ifdef KELVIN_DEPRECATE
 // Seems too expensive to iterate over all mutator threads at the end of every GC cycle, especially since

@@ -90,8 +90,6 @@ void ShenandoahPeriodicTask::task() {
 void ShenandoahPeriodicPacerNotify::task() {
   if (ShenandoahPacing) {
     ShenandoahHeap::heap()->pacer()->notify_waiters();
-  } else if (ShenandoahThrottleAllocations) {
-    ShenandoahHeap::heap()->throttler()->notify_waiters();
   }
 }
 

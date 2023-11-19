@@ -242,7 +242,7 @@ void ShenandoahHeuristics::adjust_penalty(intx step) {
 void ShenandoahHeuristics::record_success_concurrent(bool abbreviated) {
   _gc_times_learned++;
 
-  if (ShenandoahThrottleAllocations && ShenandoahHeap::heap()->throttler()->cycle_had_throttles()) {
+  if (ShenandoahThrottleAllocations && ShenandoahHeap::heap()->cycle_had_throttles()) {
     adjust_penalty(Degenerated_Penalty);
   } else {
     adjust_penalty(Concurrent_Adjust);

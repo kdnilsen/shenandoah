@@ -41,6 +41,7 @@
 #include "gc/shenandoah/shenandoahEvacTracker.hpp"
 #include "gc/shenandoah/shenandoahGenerationType.hpp"
 #include "gc/shenandoah/shenandoahMmuTracker.hpp"
+#include "gc/shenandoah/shenandoahPacer.hpp"
 #include "gc/shenandoah/shenandoahPadding.hpp"
 #include "gc/shenandoah/shenandoahScanRemembered.hpp"
 #include "gc/shenandoah/shenandoahSharedVariables.hpp"
@@ -91,6 +92,20 @@ class VMStructs;
 // too many atomic updates. uint32_t is too large, uint8_t is too small.
 typedef uint16_t ShenandoahLiveData;
 #define SHENANDOAH_LIVEDATA_MAX ((ShenandoahLiveData)-1)
+
+struct throttled_alloc_req {
+  struct throttled_alloc_req *_next;       // Other throttled requests on the queue
+  JavaThread* _current_thread;             // What is my thread id?
+  double _start_throttle_time;             // When did throttle request begin?
+  double _end_throttle_time;               // When was throttle request granted?
+  intptr_t _epoch_at_start;
+  intptr_t _requested_words;               // How many words are requested?
+  bool _is_granted;                        // True when release can be granted
+  bool _force_claim;                       // True if we need to force a claim that was not granted after too long of a delay
+  bool _is_politely_deferred;              // True if this large alloc request is stepping aside so smaller requests can proceed
+};
+
+typedef struct throttled_alloc_req ShenandoahThrottledAllocRequest;
 
 class ShenandoahRegionIterator : public StackObj {
 private:
@@ -894,6 +909,153 @@ private:
 
   void try_inject_alloc_failure();
   bool should_inject_alloc_failure();
+
+// ---------- ShenandoahHeap implementation of throttling
+// 
+
+  Monitor* _throttle_wait_monitor;
+  ShenandoahSharedFlag _need_notify_waiters;
+
+  intptr_t _throttle_epoch;
+
+  // Updated rarely, only after an allocation request has been successfully or unsuccessfully throttled.
+  size_t _allocation_requests_throttled;
+  size_t _total_words_throttled;
+  size_t _min_words_throttled;
+  size_t _max_words_throttled;
+  double _max_time_throttled;
+  double _total_time_throttled;
+
+  size_t _allocation_requests_failed;
+  size_t _total_words_failed;
+  size_t _min_words_failed;
+  size_t _max_words_failed;
+  double _max_time_failed;
+  double _total_time_failed;
+
+  size_t _phase_carryovers;
+
+  // Metrics gathered for logging
+  size_t _log_effort[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_progress[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_budget[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_authorized[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_allocated[ShenandoahThrottler::_GCPhase_Count];
+
+  size_t _log_requests[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_words_throttled[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_min_words_throttled[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_max_words_throttled[ShenandoahThrottler::_GCPhase_Count];
+  double _log_max_time_throttled[ShenandoahThrottler::_GCPhase_Count];
+  double _log_total_time_throttled[ShenandoahThrottler::_GCPhase_Count];
+
+  size_t _log_failed[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_words_failed[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_min_words_failed[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_max_words_failed[ShenandoahThrottler::_GCPhase_Count];
+  double _log_max_time_failed[ShenandoahThrottler::_GCPhase_Count];
+  double _log_total_time_failed[ShenandoahThrottler::_GCPhase_Count];
+
+  intptr_t _log_allocatable_at_end[ShenandoahThrottler::_GCPhase_Count];
+  size_t _log_carryovers[ShenandoahThrottler::_GCPhase_Count];
+
+  // Metrics gathered for recalibration
+  intptr_t _available_sum[ShenandoahThrottler::_GCPhase_Count];
+  size_t _requests_stalled_sum[ShenandoahThrottler::_GCPhase_Count];
+  size_t _words_stalled_sum[ShenandoahThrottler::_GCPhase_Count];
+
+  size_t _recalibrate_count;
+
+  size_t _throttle_queue_length;
+  size_t _throttle_queue_words;
+
+  // set and read once per phase, by control thread.
+  ShenandoahThrottler::GCPhase _phase_label;
+  size_t _phase_work;
+  size_t _phase_budget;
+
+  // Set 4 times per phase
+  size_t _authorized_to_not_throttle;
+
+  // Adjusted with every allocation, unthrottle_request, and with every increase of authorized, how many words
+  // can be allocated without throttling?
+  intptr_t _words_not_throttled;
+
+  // Minimum time to wait in a single throttle delay.   When a thread finds that it cannot claim authorization for
+  // a requested allocation, it first delays this amount.  If, after waiting, it still cannot claim authorization for
+  // the allocation, it waits twice this amount, and so on, until the delay equals MAX_THROTTLE_DELAY_MS.  Thereafter,
+  // it repeatedly waits MAX_THROTTLE_DELAY_MS until the allocation request can be granted.
+  static const uintx MIN_THROTTLE_DELAY_MS;
+
+  // Maximum time to wait in a single throttle delay.  The throttling for any particular allocation request may
+  // consist of multiple delays.  Increasing this value would result in a slower response to the eventual availability
+  // of memory.  Decreasing this value would result in more operating system toil as a thread repeatedly sleeps and
+  // wakes.  Note that a thread waiting in a throttle delay may also be notified when additional memory becomes available.
+  static const uintx MAX_THROTTLE_DELAY_MS;
+
+  inline void increment_throttle_epoch() {
+    _throttle_epoch++;
+  }
+
+  inline intptr_t throttle_epoch() {
+    return _throttle_epoch;
+  }
+
+  inline intptr_t get_throttle_budget() {
+    return _words_not_throttled;
+  }
+
+  inline void set_throttle_budget(intptr_t words) {
+    _words_not_throttled = words;
+  }
+
+  void add_to_throttle_metrics(bool successful, size_t words, double delay, size_t phase_delta);
+
+
+  void add_throttle_request_to_queue(ShenandoahThrottledAllocRequest* new_request);
+
+  intptr_t grant_memory_to_throttled_requests(intptr_t available_words);
+
+  void remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request);
+
+  void log_metrics_and_prep_for_next(double evac_update_factor);
+
+  double recalibrate_phase_efforts(double evac_update_factor);
+
+  inline size_t throttled_thread_count() {
+    return _throttle_queue_length;
+  }
+
+  void wait_in_throttle(size_t time_ms);
+
+  inline void wake_throttled() {
+    _need_notify_waiters.try_set();
+  }
+
+  void notify_throttled_waiters();
+
+  // A request is greedy if it consumes more than half of what remains in the throttle_budget
+  inline bool request_is_greedy(intptr_t words) {
+    return (words * 2 > _words_not_throttled);
+  }
+
+  bool claim_throttled_for_alloc(intptr_t words, bool force, bool allow_greed = false);
+
+  void unthrottle_for_alloc(ShenandoahThrottledAllocRequest* original_req, intptr_t words);
+
+public:
+
+  void absorb_throttle_metrics_and_increment_epoch(size_t progress);
+
+
+  void start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id,
+                                   size_t initial_budget, size_t phase_budget, size_t planned_work);
+
+  // Called by heuristics to determine if penalty is required on GC triggers
+  bool cycle_had_throttles() const;
+
+  // Called by ShenandoahThrottler each time new memory is budgeted and authorized
+  void add_to_throttle_budget(size_t budgeted_words);
 };
 
 #endif // SHARE_GC_SHENANDOAH_SHENANDOAHHEAP_HPP

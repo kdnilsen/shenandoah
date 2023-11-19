@@ -223,18 +223,6 @@ public:
   // Much of the remembered set is not DIRTY and is not pointers.
   static const uintx REMEMBERED_SET_UPDATE_FACTOR;
 
-  // Maximum time to wait in a single throttle delay.  The throttling for any particular allocation request may
-  // consist of multiple delays.  Increasing this value would result in a slower response to the eventual availability
-  // of memory.  Decreasing this value would result in more operating system toil as a thread repeatedly sleeps and
-  // wakes.  Note that a thread waiting in a throttle delay will be notified when additional memory becomes available.
-  static const uintx MAX_THROTTLE_DELAY_MS;
-
-  // Minimum time to wait in a single throttle delay.   When a thread finds that it cannot claim authorization for
-  // a requested allocation, it first delays this amount.  If, after waiting, it still cannot claim authorization for
-  // the allocation, it waits twice this amount, and so on, until the delay equals MAX_THROTTLE_DELAY_MS.  Thereafter,
-  // it repeatedly waits MAX_THROTTLE_DELAY_MS until the allocation request can be granted.
-  static const uintx MIN_THROTTLE_DELAY_MS;
-
   enum GCPhase {
     _idle,                      // Waiting to start next GC cycle
     _reset,                     // Reset state to begin new GC cycle
@@ -255,8 +243,6 @@ public:
 private:
   ShenandoahHeap* _heap;
   bool _is_generational;
-  Monitor* _wait_monitor;
-  ShenandoahSharedFlag _need_notify_waiters;
 
   // The effort to evacuate is modeled as this factor multiplied by the effort required to update, as scaled by the
   // relevant workload basis.  The basis for evacuation is live memory within collection set.  The basis for updating
@@ -266,108 +252,28 @@ private:
   // A larger value of _evacuate_vs_update_factor denotes that evacuation work is much harder than updating work.
   // In other words, large value provides large budget to evacuation.
   double _evacuate_vs_update_factor;
-
-  // Metrics gathered for logging
-  size_t _log_effort[_GCPhase_Count];
-  size_t _log_progress[_GCPhase_Count];
-  size_t _log_budget[_GCPhase_Count];
-  size_t _log_authorized[_GCPhase_Count];
-  size_t _log_allocated[_GCPhase_Count];
-
-  size_t _log_requests[_GCPhase_Count];
-  size_t _log_words_throttled[_GCPhase_Count];
-  size_t _log_min_words_throttled[_GCPhase_Count];
-  size_t _log_max_words_throttled[_GCPhase_Count];
-  double _log_max_time_throttled[_GCPhase_Count];
-  double _log_total_time_throttled[_GCPhase_Count];
-
-  size_t _log_failed[_GCPhase_Count];
-  size_t _log_words_failed[_GCPhase_Count];
-  size_t _log_min_words_failed[_GCPhase_Count];
-  size_t _log_max_words_failed[_GCPhase_Count];
-  double _log_max_time_failed[_GCPhase_Count];
-  double _log_total_time_failed[_GCPhase_Count];
-
-  intptr_t _log_allocatable_at_end[_GCPhase_Count];
-  size_t _log_carryovers[_GCPhase_Count];
-
-  // Metrics gathered for recalibration
-  intptr_t _available_sum[_GCPhase_Count];
-  size_t _requests_stalled_sum[_GCPhase_Count];
-  size_t _words_stalled_sum[_GCPhase_Count];
-
-  size_t _recalibrate_count;
-
-  // set and read once per phase, by control thread.
-  GCPhase _phase_label;
-  size_t _phase_work;
-  size_t _phase_budget;
+  
   size_t _most_recent_live_young_words;
   size_t _most_recent_live_global_words;
 
-  // Set once per phase
-  // _work_completed and _budget_supplement are both defined in terms of words of memory.
-  size_t _work_completed[_GCPhase_Count];
-  size_t _budget_supplement[_GCPhase_Count];
-
-  // _epoch represents the current phase of GC.  This is different from the current GC cycle.
-  volatile intptr_t _epoch;
-
-  // Set 4 times per phase
-  volatile size_t _phase_authorized;
-
-#ifdef KELVIN_DEPRECATE
-  // Set 4 times per phase (as quantums of work are completed)
-  volatile size_t _authorized_allocations;
-#endif
-#undef KELVIN_THROTTLES
-#ifdef KELVIN_THROTTLES
-  volatile size_t _threads_in_throttle;
-#endif
-  // Updated rarely, only after an allocation request has been successfully or unsuccessfully throttled
-  volatile size_t _allocation_requests_throttled;
-  volatile size_t _total_words_throttled;
-  volatile size_t _min_words_throttled;
-  volatile size_t _max_words_throttled;
-  volatile double _max_time_throttled;
-  volatile double _total_time_throttled;
-
-  volatile size_t _allocation_requests_failed;
-  volatile size_t _total_words_failed;
-  volatile size_t _min_words_failed;
-  volatile size_t _max_words_failed;
-  volatile double _max_time_failed;
-  volatile double _total_time_failed;
-
-  volatile size_t _phase_carryovers;
+  // Set once per GC phase, at start of phase
+  size_t _work_completed[_Microphase_Count];
+  size_t _budget_supplement[_Microphase_Count];
 
   // Heavily updated, protect from accidental false sharing
   shenandoah_padding(0);
-#ifdef KELVIN_DEPRECATE
-  // Words of memory allocated.
-  volatile size_t _allocated;
-#endif
-  volatile intptr_t _available_words;
-  shenandoah_padding(1);                // TODO: Is this redundant with shenandoah_padding(2), wasteful? no-op?
-
-  // Heavily updated, protect from accidental false sharing
-  shenandoah_padding(2);
   // Words of memory "processed" in the current phase.  Processing is defined differently depending on the phase.
   volatile size_t _progress;
-  shenandoah_padding(3);
+  shenandoah_padding(1);
 
 public:
   ShenandoahThrottler(ShenandoahHeap* heap);
-
-  bool cycle_had_throttles() const;
 
   void setup_for_mark(size_t allocatable_words, bool is_global);
   void setup_for_evac(size_t allocatable_words, size_t evac_words, size_t promo_in_place_words, size_t uncollected_young_words,
                       size_t uncollected_old_words, bool is_mixed, bool is_global, bool is_bootstrap);
   void setup_for_updaterefs(size_t allocatable_words, size_t promo_in_place_words,
                             size_t uncollected_young_words, size_t uncollected_old_words, bool is_mixed_or_global);
-
-  // Not sure if I want to treat idle, reset as separate phases
   void setup_for_idle(size_t allocatable_words);
   void setup_for_reset(size_t allocatable_words);
 
@@ -380,44 +286,25 @@ public:
     return work;
   }
 
+  inline double get_evacuate_vs_update_factor() {
+    return _evacuate_vs_update_factor;
+  }
+
+  inline void set_evacuate_vs_update_factor(double val) {
+    _evacuate_vs_update_factor = val;
+  }
+
   inline void report_mark(size_t words);
   inline void report_evac(size_t words);
   inline void report_updaterefs(size_t words);
 
-  inline void report_alloc(size_t words);
-
-  bool claim_for_alloc(intptr_t words, bool force, bool allow_greed = false);
-  size_t throttle_for_alloc(ShenandoahAllocRequest req);
-  void unthrottle_for_alloc(intptr_t epoch, size_t words);
-
-  void notify_waiters();
-
-  intptr_t epoch();
-
-  void flush_stats_to_cycle();
-  void print_cycle_on(outputStream* out);
+  static const char* phase_name(GCPhase p);
 
 private:
-  void publish_metrics();
-  void reset_metrics(GCPhase id, size_t planned_work, size_t budget, size_t initial_authorization);
-  void add_to_metrics(bool successful, size_t words, double delay, size_t epoch_delta);
-  void recalibrate_phase_efforts();
-  void log_metrics_and_prep_for_next(double evac_update_factor);
-
+  void publish_metrics_and_increment_epoch();
   inline void report_internal(size_t words);
   inline void report_progress_internal(size_t words);
-
-  inline void wake_throttled();
-
   inline void add_budget(size_t words);
-
-#ifdef KELVIN_DEPRECATE
-  void restart_with(size_t non_taxable_bytes, double tax_rate);
-#endif
-
-  const char* phase_name(GCPhase p);
-
-  void wait(size_t time_ms);
 };
 
 

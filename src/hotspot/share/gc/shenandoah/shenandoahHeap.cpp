@@ -506,6 +506,32 @@ jint ShenandoahHeap::initialize() {
 
   print_init_logger();
 
+  // Initialize throttling support
+
+  for (int p = ShenandoahThrottler::_idle; p < ShenandoahThrottler::_GCPhase_Count; p++) {
+    _log_effort[p]       = ShenandoahThrottler::_not_a_label;
+    _log_progress[p]     = 0;
+    _log_budget[p]       = 0;
+    _log_authorized[p]   = 0;
+    _log_allocated[p]    = 0;
+
+    _log_requests[p]             = 0;
+    _log_words_throttled[p]      = 0;
+    _log_min_words_throttled[p]  = SIZE_MAX;
+    _log_max_words_throttled[p]  = 0;
+    _log_max_time_throttled[p]   = 0.0;
+    _log_total_time_throttled[p] = 0.0;
+  
+    _log_failed[p]               = 0;
+    _log_words_failed[p]         = 0;
+    _log_min_words_failed[p]     = SIZE_MAX;
+    _log_max_words_failed[p]     = 0;
+    _log_max_time_failed[p]      = 0.0;
+    _log_total_time_failed[p]    = 0.0;
+
+    _log_allocatable_at_end[p]   = 0;
+  }
+
   return JNI_OK;
 }
 
@@ -660,7 +686,30 @@ ShenandoahHeap::ShenandoahHeap(ShenandoahCollectorPolicy* policy) :
   _aux_bitmap_region_special(false),
   _liveness_cache(nullptr),
   _collection_set(nullptr),
-  _card_scan(nullptr)
+  _card_scan(nullptr),
+  _throttle_wait_monitor(new Monitor(Mutex::safepoint-1, "ShenandoahWaitMonitor_lock", true)),
+  _throttle_epoch(0),
+  _allocation_requests_throttled(0),
+  _total_words_throttled(0),
+  _min_words_throttled(0),
+  _max_words_throttled(0),
+  _max_time_throttled(0.0),
+  _total_time_throttled(0.0),
+  _allocation_requests_failed(0),
+  _total_words_failed(0),
+  _min_words_failed(SIZE_MAX),
+  _max_words_failed(0),
+  _max_time_failed(0.0),
+  _total_time_failed(0.0),
+  _phase_carryovers(0),
+  _recalibrate_count(0),
+  _throttle_queue_length(0),
+  _throttle_queue_words(0),
+  _phase_label(ShenandoahThrottler::_not_a_label),
+  _phase_work(0),
+  _phase_budget(0),
+  _authorized_to_not_throttle(0),
+  _words_not_throttled(0)
 {
 }
 
@@ -874,9 +923,8 @@ void ShenandoahHeap::notify_mutator_alloc_words(size_t words, size_t waste) {
       pacer()->claim_for_alloc(waste, true);
     }
   } else if (ShenandoahThrottleAllocations) {
-    control_thread()->pacing_notify_alloc(words);
     if (waste > 0) {
-      throttler()->claim_for_alloc(waste, true);
+      claim_throttled_for_alloc(waste, true);
     }
   }
 }
@@ -1362,21 +1410,18 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
     if (ShenandoahPacing) {
       pacer()->pace_for_alloc(req.size());
       pacer_epoch = pacer()->epoch();
-    } else if (ShenandoahThrottleAllocations) {
+    }
+#ifdef KELVIN_DEPRECATE
+ else if (ShenandoahThrottleAllocations) {
       size_t authorized_size = throttler()->throttle_for_alloc(req);
       pacer_epoch = throttler()->epoch();
       if (authorized_size < req.size()) {
         use_surrogate_req = true;
       }
     }
-
+#endif
     if (!ShenandoahAllocFailureALot || !should_inject_alloc_failure()) {
-      if (use_surrogate_req) {
-        result = allocate_memory_under_lock(surrogate, in_new_region, is_promotion);
-        req.set_actual_size(surrogate.actual_size());
-      } else {
-        result = allocate_memory_under_lock(req, in_new_region, is_promotion);
-      }
+      result = allocate_memory_under_lock(req, in_new_region, is_promotion);
     }
 
     // Check that gc overhead is not exceeded.
@@ -1402,12 +1447,7 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
     while (result == nullptr
         && (get_gc_no_progress_count() == 0 || original_count == shenandoah_policy()->full_gc_count())) {
       control_thread()->handle_alloc_failure(req);
-      if (use_surrogate_req) {
-        result = allocate_memory_under_lock(surrogate, in_new_region, is_promotion);
-        req.set_actual_size(surrogate.actual_size());
-      } else {
-        result = allocate_memory_under_lock(req, in_new_region, is_promotion);
-      }
+      result = allocate_memory_under_lock(req, in_new_region, is_promotion);
     }
 
     if (log_is_enabled(Debug, gc, alloc)) {
@@ -1435,7 +1475,7 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
   // for any waste created by retiring regions with this request.
   increase_used(req);
 
-  size_t requested = use_surrogate_req? surrogate.size(): req.size();
+  size_t requested = req.size();
   size_t actual = req.actual_size();
 
   assert ((result == nullptr) || req.is_lab_alloc() || (requested == actual),
@@ -1451,201 +1491,287 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
       } else if (requested < actual) {
         pacer()->claim_for_alloc(actual - requested, true);
       }
-    } else if (ShenandoahThrottleAllocations) {
-      if ((pacer_epoch > 0) && (requested > actual)) {
-        throttler()->unthrottle_for_alloc(pacer_epoch, requested - actual);
-      } else if (requested < actual) {
-        throttler()->claim_for_alloc(actual - requested, true);
-      }
     }
   }
 
   return result;
 }
+
+static const double UninitializedTime = -1.0;
 
 HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req, bool& in_new_region, bool is_promotion) {
-  bool try_smaller_lab_size = false;
-  size_t smaller_lab_size;
-  {
-    // promotion_eligible pertains only to PLAB allocations, denoting that the PLAB is allowed to allocate for promotions.
-    bool promotion_eligible = false;
-    bool allow_allocation = true;
-    bool plab_alloc = false;
-    size_t requested_bytes = req.size() * HeapWordSize;
-    HeapWord* result = nullptr;
-    ShenandoahHeapLocker locker(lock());
-    Thread* thread = Thread::current();
+  intptr_t epoch_at_start_of_throttle, epoch_at_end_of_throttle;
+  bool use_surrogate = false;
+  bool throttling = false;
+  ShenandoahThrottledAllocRequest throttled_request;
+  size_t current_throttle_pause = MIN_THROTTLE_DELAY_MS;
 
-    if (mode()->is_generational()) {
-      if (req.affiliation() == YOUNG_GENERATION) {
-        if (req.is_mutator_alloc()) {
-          size_t young_words_available = young_generation()->available() / HeapWordSize;
-          if (ShenandoahElasticTLAB && req.is_lab_alloc() && (req.min_size() < young_words_available)) {
-            // Allow ourselves to try a smaller lab size even if requested_bytes <= young_available.  We may need a smaller
-            // lab size because young memory has become too fragmented.
-            try_smaller_lab_size = true;
-            smaller_lab_size = (young_words_available < req.size())? young_words_available: req.size();
-          } else if (req.size() > young_words_available) {
-            // Can't allocate because even min_size() is larger than remaining young_available
-            log_info(gc, ergo)("Unable to shrink %s alloc request of minimum size: " SIZE_FORMAT
-                               ", young words available: " SIZE_FORMAT, req.type_string(),
-                               HeapWordSize * (req.is_lab_alloc()? req.min_size(): req.size()), young_words_available);
-            return nullptr;
-          }
-        }
-      } else {                    // reg.affiliation() == OLD_GENERATION
-        assert(req.type() != ShenandoahAllocRequest::_alloc_gclab, "GCLAB pertains only to young-gen memory");
-        if (req.type() ==  ShenandoahAllocRequest::_alloc_plab) {
-          plab_alloc = true;
-          size_t promotion_avail = get_promoted_reserve();
-          size_t promotion_expended = get_promoted_expended();
-          if (promotion_expended + requested_bytes > promotion_avail) {
-            promotion_avail = 0;
-            if (get_old_evac_reserve() == 0) {
-              // There are no old-gen evacuations in this pass.  There's no value in creating a plab that cannot
-              // be used for promotions.
-              allow_allocation = false;
+  while (true) {
+    while (true) {
+      {
+        ShenandoahHeapLocker locker(lock());
+        size_t words = req.size();
+
+        if (ShenandoahThrottleAllocations) {
+          if (throttling) {
+            // This is second (or a subsequent) iteration through this loop, having already initalized throttled_request.
+            if (throttled_request._force_claim) {
+              remove_throttled_request_from_queue(&throttled_request);
+              claim_throttled_for_alloc(words, true);
+              throttled_request._is_granted = true;
             }
-          } else {
-            promotion_avail = promotion_avail - (promotion_expended + requested_bytes);
-            promotion_eligible = true;
-          }
-        } else if (is_promotion) {
-          // This is a shared alloc for promotion
-          size_t promotion_avail = get_promoted_reserve();
-          size_t promotion_expended = get_promoted_expended();
-          if (promotion_expended + requested_bytes > promotion_avail) {
-            promotion_avail = 0;
-          } else {
-            promotion_avail = promotion_avail - (promotion_expended + requested_bytes);
-          }
-          if (promotion_avail == 0) {
-            // We need to reserve the remaining memory for evacuation.  Reject this allocation.  The object will be
-            // evacuated to young-gen memory and promoted during a future GC pass.
-            return nullptr;
-          }
-          // Else, we'll allow the allocation to proceed.  (Since we hold heap lock, the tested condition remains true.)
-        } else {
-          // This is a shared allocation for evacuation.  Memory has already been reserved for this purpose.
-        }
-      }
-    } // This ends the is_generational() block
-
-    // First try the original request.  If TLAB request size is greater than available, allocate() will attempt to downsize
-    // request to fit within available memory.
-    result = (allow_allocation)? _free_set->allocate(req, in_new_region): nullptr;
-    if (result != nullptr) {
-      if (req.is_old()) {
-        ShenandoahThreadLocalData::reset_plab_promoted(thread);
-        if (req.is_gc_alloc()) {
-          bool disable_plab_promotions = false;
-          if (req.type() ==  ShenandoahAllocRequest::_alloc_plab) {
-            if (promotion_eligible) {
-              size_t actual_size = req.actual_size() * HeapWordSize;
-              // The actual size of the allocation may be larger than the requested bytes (due to alignment on card boundaries).
-              // If this puts us over our promotion budget, we need to disable future PLAB promotions for this thread.
-              if (get_promoted_expended() + actual_size <= get_promoted_reserve()) {
-                // Assume the entirety of this PLAB will be used for promotion.  This prevents promotion from overreach.
-                // When we retire this plab, we'll unexpend what we don't really use.
-                ShenandoahThreadLocalData::enable_plab_promotions(thread);
-                expend_promoted(actual_size);
-                assert(get_promoted_expended() <= get_promoted_reserve(), "Do not expend more promotion than budgeted");
-                ShenandoahThreadLocalData::set_plab_preallocated_promoted(thread, actual_size);
+            if (throttled_request._is_granted) {
+              // throttled_request has already been removed from queue
+              double throttle_time = throttled_request._end_throttle_time - throttled_request._start_throttle_time;
+              intptr_t epoch_at_end_of_throttle = throttle_epoch();
+              add_to_throttle_metrics(true, words, throttle_time, epoch_at_end_of_throttle - throttled_request._epoch_at_start);
+              // fall through to execute allocation code
+            } else if (throttled_request._is_politely_deferred) {
+              // We've waited our obligatory delay.  We can now claim the requested memory if it is still available.
+              // If it is not available, we'll continue to wait, but not politely.
+              if (claim_throttled_for_alloc(words, false, true)) {
+                // no longer need to throttle, but we whould record the throttling we already experienced.
+                double throttle_time = throttled_request._end_throttle_time - throttled_request._start_throttle_time;
+                intptr_t epoch_at_end_of_throttle = throttle_epoch();
+                remove_throttled_request_from_queue(&throttled_request);
+                add_to_throttle_metrics(true, words, throttle_time, epoch_at_end_of_throttle - throttled_request._epoch_at_start);
+                // fall through to execute allocation code
               } else {
-                disable_plab_promotions = true;
+                // We already know the current thread is not attaching via jni and is_active_java_thread.  I'll break
+                // out of inner loop so I can wait for memory to become available.
+                throttled_request._is_politely_deferred = false;
+                break;  
               }
             } else {
-              disable_plab_promotions = true;
+              // This thread was in throttle and was notified, but its request was not granted.
+              // While we have the lock, let's try to make our request even smaller.
+              if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
+                words /= 4;
+                if (words < req.min_size()) {
+                  words = req.min_size();
+                }
+                throttled_request._requested_words = words;
+              }
+              // break out of the loop so we can wait some more.
+              break;
             }
-            if (disable_plab_promotions) {
-              // Disable promotions in this thread because entirety of this PLAB must be available to hold old-gen evacuations.
-              ShenandoahThreadLocalData::disable_plab_promotions(thread);
-              ShenandoahThreadLocalData::set_plab_preallocated_promoted(thread, 0);
+          } else if (claim_throttled_for_alloc(words, false)) {
+            // Our request is granted without requring any throttle.
+            // Fall through to execute regular allocation code below.
+          } else {
+            JavaThread* current_thread = JavaThread::current();
+            if (current_thread->is_attaching_via_jni() || !current_thread->is_active_Java_thread()) {
+              if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
+                // Since we're in a throttling situation, make our TLAB request more conservative
+                words = req.min_size();
+                use_surrogate = true;
+              }
+              // Force claim for alloc request that cannot block.
+              bool claimed = claim_throttled_for_alloc(words, true);
+              assert(claimed, "Forceful claim should always succeed");
+              // fall through to execute regular allocation code below
+            } else {
+              throttling = true;
+              throttled_request._current_thread = current_thread;
+              throttled_request._start_throttle_time = UninitializedTime;  // fetch start time below, without lock
+              throttled_request._epoch_at_start = throttle_epoch();
+              // Since we are throttling, we know the allocator is under duress.  Reduce our request if possible.
+              if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
+                words = req.size() / 4;
+                if (words < req.min_size()) {
+                  words = req.min_size();
+                }
+                use_surrogate = true;
+              }
+              throttled_request._requested_words = words;
+              throttled_request._is_granted = false;
+              throttled_request._force_claim = false;
+              throttled_request._is_politely_deferred = request_is_greedy(words);
+              add_throttle_request_to_queue(&throttled_request);
+              // break out of loop so we can throttle without holding Heap Lock.
+              break;
             }
-          } else if (is_promotion) {
-            // Shared promotion.  Assume size is requested_bytes.
-            expend_promoted(requested_bytes);
-            assert(get_promoted_expended() <= get_promoted_reserve(), "Do not expend more promotion than budgeted");
+          }
+        } // This ends the special code for ShenandoahThrottleAllocations
+
+        // promotion_eligible pertains only to PLAB allocations, denoting that the PLAB is allowed to allocate for promotions.
+        bool promotion_eligible = false;
+        bool allow_allocation = true;
+        bool plab_alloc = false;
+        size_t requested_bytes = req.size() * HeapWordSize;
+        HeapWord* result = nullptr;
+        Thread* thread = Thread::current();
+        size_t min_size = (use_surrogate)? req.min_size(): words;
+        ShenandoahAllocRequest surrogate = ShenandoahAllocRequest::for_tlab(min_size, words);
+        ShenandoahAllocRequest& the_req = use_surrogate? surrogate: req;
+
+        if (mode()->is_generational()) {
+          if (the_req.affiliation() == YOUNG_GENERATION) {
+            if (the_req.is_mutator_alloc()) {
+              size_t young_words_available = young_generation()->available() / HeapWordSize;
+              if ((ShenandoahElasticTLAB && the_req.is_lab_alloc() && (the_req.min_size() < young_words_available)) ||
+                  (the_req.size() > young_words_available)) {
+                if (ShenandoahThrottleAllocations) {
+                  unthrottle_for_alloc(&throttled_request, the_req.size());
+                }
+                return nullptr;
+              }
+            }
+          } else {                    // reg.affiliation() == OLD_GENERATION
+            assert(the_req.type() != ShenandoahAllocRequest::_alloc_gclab, "GCLAB pertains only to young-gen memory");
+            if (the_req.type() ==  ShenandoahAllocRequest::_alloc_plab) {
+              plab_alloc = true;
+              size_t promotion_avail = get_promoted_reserve();
+              size_t promotion_expended = get_promoted_expended();
+              if (promotion_expended + requested_bytes > promotion_avail) {
+                promotion_avail = 0;
+                if (get_old_evac_reserve() == 0) {
+                  // There are no old-gen evacuations in this pass.  There's no value in creating a plab that cannot
+                  // be used for promotions.
+                  allow_allocation = false;
+                }
+              } else {
+                promotion_avail = promotion_avail - (promotion_expended + requested_bytes);
+                promotion_eligible = true;
+              }
+            } else if (is_promotion) {
+              // This is a shared alloc for promotion
+              size_t promotion_avail = get_promoted_reserve();
+              size_t promotion_expended = get_promoted_expended();
+              if (promotion_expended + requested_bytes > promotion_avail) {
+                promotion_avail = 0;
+              } else {
+                promotion_avail = promotion_avail - (promotion_expended + requested_bytes);
+              }
+              if (promotion_avail == 0) {
+                // We need to reserve the remaining memory for evacuation.  Reject this allocation.  The object will be
+                // evacuated to young-gen memory and promoted during a future GC pass.
+                return nullptr;
+              }
+              // Else, we'll allow the allocation to proceed.  (Since we hold heap lock, the tested condition remains true.)
+            } else {
+              // This is a shared allocation for evacuation.  Memory has already been reserved for this purpose.
+            }
+          }
+        } // This ends the is_generational() block
+
+        // First try the original request.  If TLAB request size is greater than available, allocate() will attempt to downsize
+        // request to fit within available memory.
+        result = (allow_allocation)? _free_set->allocate(the_req, in_new_region): nullptr;
+        if (result != nullptr) {
+          if (the_req.is_old()) {
+            ShenandoahThreadLocalData::reset_plab_promoted(thread);
+            if (the_req.is_gc_alloc()) {
+              bool disable_plab_promotions = false;
+              if (the_req.type() ==  ShenandoahAllocRequest::_alloc_plab) {
+                if (promotion_eligible) {
+                  size_t actual_size = the_req.actual_size() * HeapWordSize;
+                  // Actual size of the allocation may be larger than the requested bytes (due to alignment on card boundaries).
+                  // If this puts us over our promotion budget, we need to disable future PLAB promotions for this thread.
+                  if (get_promoted_expended() + actual_size <= get_promoted_reserve()) {
+                    // Assume the entirety of this PLAB will be used for promotion.  This prevents promotion from overreach.
+                    // When we retire this plab, we'll unexpend what we don't really use.
+                    ShenandoahThreadLocalData::enable_plab_promotions(thread);
+                    expend_promoted(actual_size);
+                    assert(get_promoted_expended() <= get_promoted_reserve(), "Do not expend more promotion than budgeted");
+                    ShenandoahThreadLocalData::set_plab_preallocated_promoted(thread, actual_size);
+                  } else {
+                    disable_plab_promotions = true;
+                  }
+                } else {
+                  disable_plab_promotions = true;
+                }
+                if (disable_plab_promotions) {
+                  // Disable promotions in this thread because entirety of this PLAB must be available to hold old-gen evacuations.
+                  ShenandoahThreadLocalData::disable_plab_promotions(thread);
+                  ShenandoahThreadLocalData::set_plab_preallocated_promoted(thread, 0);
+                }
+              } else if (is_promotion) {
+                // Shared promotion.  Assume size is requested_bytes.
+                expend_promoted(requested_bytes);
+                assert(get_promoted_expended() <= get_promoted_reserve(), "Do not expend more promotion than budgeted");
+              }
+            }
+
+            // Register the newly allocated object while we're holding the global lock since there's no synchronization
+            // built in to the implementation of register_object().  There are potential races when multiple independent
+            // threads are allocating objects, some of which might span the same card region.  For example, consider
+            // a card table's memory region within which three objects are being allocated by three different threads:
+            //
+            // objects being "concurrently" allocated:
+            //    [-----a------][-----b-----][--------------c------------------]
+            //            [---- card table memory range --------------]
+            //
+            // Before any objects are allocated, this card's memory range holds no objects.  Note that allocation of object a
+            //   wants to set the starts-object, first-start, and last-start attributes of the preceding card region.
+            //   allocation of object b wants to set the starts-object, first-start, and last-start attributes of this card region.
+            //   allocation of object c also wants to set the starts-object, first-start, and last-start attributes of this
+            //   card region.
+            //
+            // The thread allocating b and the thread allocating c can "race" in various ways, resulting in confusion, such as
+            // last-start representing object b while first-start represents object c.  This is why we need to require all
+            // register_object() invocations to be "mutually exclusive" with respect to each card's memory range.
+            ShenandoahHeap::heap()->card_scan()->register_object(result);
+          }
+        } else {
+          // The allocation failed.  If this was a plab allocation, We've already retired it and no longer have a plab.
+          if (the_req.is_old() && the_req.is_gc_alloc() && (the_req.type() == ShenandoahAllocRequest::_alloc_plab)) {
+            // We don't need to disable PLAB promotions because there is no PLAB.  We leave promotions enabled because
+            // this allows the surrounding infrastructure to retry alloc_plab_slow() with a smaller PLAB size.
+            ShenandoahThreadLocalData::set_plab_preallocated_promoted(thread, 0);
           }
         }
+        if (result == nullptr) {
+          the_req.set_actual_size(0);
+        }
+        if (use_surrogate) {
+          req.set_actual_size(the_req.actual_size());
+        }
+        if (ShenandoahThrottleAllocations && req.is_mutator_alloc()) {
+          if (req.actual_size() < the_req.size()) {
+            // We had throttling approval for the_req.size(), but we consumed less
+            unthrottle_for_alloc(&throttled_request, the_req.size() - the_req.actual_size());
+          } else if (req.actual_size() > the_req.size()) {
+            // Force the claim for extra memory allocated
+            claim_throttled_for_alloc(req.actual_size() - the_req.size(), true);
+          }
+        }
+        return result;
+      
+      } // This closes the block that holds the heap lock, releasing the lock.
+    }   // This closes the inner nested infinite loop.  We break out of the inner-nested loop so we can throttle
 
-        // Register the newly allocated object while we're holding the global lock since there's no synchronization
-        // built in to the implementation of register_object().  There are potential races when multiple independent
-        // threads are allocating objects, some of which might span the same card region.  For example, consider
-        // a card table's memory region within which three objects are being allocated by three different threads:
-        //
-        // objects being "concurrently" allocated:
-        //    [-----a------][-----b-----][--------------c------------------]
-        //            [---- card table memory range --------------]
-        //
-        // Before any objects are allocated, this card's memory range holds no objects.  Note that allocation of object a
-        //   wants to set the starts-object, first-start, and last-start attributes of the preceding card region.
-        //   allocation of object b wants to set the starts-object, first-start, and last-start attributes of this card region.
-        //   allocation of object c also wants to set the starts-object, first-start, and last-start attributes of this
-        //   card region.
-        //
-        // The thread allocating b and the thread allocating c can "race" in various ways, resulting in confusion, such as
-        // last-start representing object b while first-start represents object c.  This is why we need to require all
-        // register_object() invocations to be "mutually exclusive" with respect to each card's memory range.
-        ShenandoahHeap::heap()->card_scan()->register_object(result);
-      }
-    } else {
-      // The allocation failed.  If this was a plab allocation, We've already retired it and no longer have a plab.
-      if (req.is_old() && req.is_gc_alloc() && (req.type() == ShenandoahAllocRequest::_alloc_plab)) {
-        // We don't need to disable PLAB promotions because there is no PLAB.  We leave promotions enabled because
-        // this allows the surrounding infrastructure to retry alloc_plab_slow() with a smaller PLAB size.
-        ShenandoahThreadLocalData::set_plab_preallocated_promoted(thread, 0);
-      }
+    // What follows is in-lined implementation of what used to be called throttle_for_alloc()
+    
+    // We only reach here if we desire to throttle an allocation request.
+    if (throttled_request._start_throttle_time == UninitializedTime) {
+      throttled_request._start_throttle_time = os::elapsedTime();
     }
-    if ((result != nullptr) || !try_smaller_lab_size) {
-      return result;
+    wait_in_throttle(current_throttle_pause);
+    current_throttle_pause *= 2;
+    if (current_throttle_pause > MAX_THROTTLE_DELAY_MS) {
+      current_throttle_pause = MAX_THROTTLE_DELAY_MS;
     }
-    // else, fall through to try_smaller_lab_size
-  } // This closes the block that holds the heap lock, releasing the lock.
 
-  // We failed to allocate the originally requested lab size.  Let's see if we can allocate a smaller lab size.
-  if (req.size() == smaller_lab_size) {
-    // If we were already trying to allocate min size, no value in attempting to repeat the same.  End the recursion.
-    return nullptr;
+    // A normal GC cycle has 4 epochs, but bootstrap with concurrent old marking has 6
+    if (!throttled_request._is_granted && (throttle_epoch() - throttled_request._epoch_at_start > 6)) {
+      throttled_request._force_claim = true;
+    }
+    if (throttled_request._is_granted || throttled_request._force_claim) {
+      // We're about to perform the allocation
+      throttled_request._end_throttle_time = os::elapsedTime();
+
+      // We don't use the information gathered by the folllowing commented out code, but it might be of value if we want
+      // to mimic the metrics provided by ShenandoahPacer:
+      //
+      // double throttle_time = throttled_allocation._end_throttle_time - throttled_allocation.start_throttle_time;
+      // ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
+    }
+    // Following brace closes the body of outer-nested infinite while loop.  After pausing in throttle request,
+    // control flows to of loop where we acquire the heap lock and endeavor to perform the requested allocation.
   }
-
-  // We arrive here if the tlab allocation request can be resized to fit within young_available
-  assert((req.affiliation() == YOUNG_GENERATION) && req.is_lab_alloc() && req.is_mutator_alloc() &&
-         (smaller_lab_size < req.size()), "Only shrink allocation request size for TLAB allocations");
-
-  // By convention, ShenandoahAllocationRequest is primarily read-only.  The only mutable instance data is represented by
-  // actual_size(), which is overwritten with the size of the allocaion when the allocation request is satisfied.  We use a
-  // recursive call here rather than introducing new methods to mutate the existing ShenandoahAllocationRequest argument.
-  // Mutation of the existing object might result in astonishing results if calling contexts assume the content of immutable
-  // fields remain constant.  The original TLAB allocation request was for memory that exceeded the current capacity.  We'll
-  // attempt to allocate a smaller TLAB.  If this is successful, we'll update actual_size() of our incoming
-  // ShenandoahAllocRequest.  If the recursive request fails, we'll simply return nullptr.
-
-  // Note that we've relinquished the HeapLock and some other thread may perform additional allocation before our recursive
-  // call reacquires the lock.  If that happens, we will need another recursive call to further reduce the size of our request
-  // for each time another thread allocates young memory during the brief intervals that the heap lock is available to
-  // interfering threads.  We expect this interference to be rare.  The recursion bottoms out when young_available is
-  // smaller than req.min_size().  The inner-nested call to allocate_memory_under_lock() uses the same min_size() value
-  // as this call, but it uses a preferred size() that is smaller than our preferred size, and is no larger than what we most
-  // recently saw as the memory currently available within the young generation.
-
-  // TODO: At the expense of code clarity, we could rewrite this recursive solution to use iteration.  We need at most one
-  // extra instance of the ShenandoahAllocRequest, which we can re-initialize multiple times inside a loop, with one iteration
-  // of the loop required for each time the existing solution would recurse.  An iterative solution would be more efficient
-  // in CPU time and stack memory utilization.  The expectation is that it is very rare that we would recurse more than once
-  // so making this change is not currently seen as a high priority.
-
-  ShenandoahAllocRequest smaller_req = ShenandoahAllocRequest::for_tlab(req.min_size(), smaller_lab_size);
-
-  // Note that shrinking the preferred size gets us past the gatekeeper that checks whether there's available memory to
-  // satisfy the allocation request.  The reality is the actual TLAB size is likely to be even smaller, because it will
-  // depend on how much memory is available within mutator regions that are not yet fully used.
-  HeapWord* result = allocate_memory_under_lock(smaller_req, in_new_region, is_promotion);
-  if (result != nullptr) {
-    req.set_actual_size(smaller_req.actual_size());
-  }
-  return result;
 }
+
 
 HeapWord* ShenandoahHeap::mem_allocate(size_t size,
                                         bool*  gc_overhead_limit_was_exceeded) {
@@ -3668,5 +3794,554 @@ void ShenandoahHeap::log_heap_status(const char* msg) const {
     old_generation()->log_status(msg);
   } else {
     global_generation()->log_status(msg);
+  }
+}
+
+
+// Throttling implementation follows
+
+
+const uintx ShenandoahHeap::MAX_THROTTLE_DELAY_MS = 16;
+const uintx ShenandoahHeap::MIN_THROTTLE_DELAY_MS = 4;
+
+// Principles of operation
+//  new request comes in: try to claim without throttling
+//  add_budget() or unthrottle(): apply budget to queued requests and unqueue (but we may not notify right away)
+//  sleeping threads will wake on their own and will move forward
+//  we'll wake_throttled() if more than half of queued threads have been unqueued or at each new traunche of available memory
+
+ShenandoahThrottledAllocRequest *_throttle_queue_head, *_throttle_queue_tail;
+size_t _throttle_queue_length = 0;
+size_t _throttle_queue_words = 0;
+intptr_t _throttle_budget = 0;
+
+
+void ShenandoahHeap::start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id,
+                                                 size_t initial_budget, size_t phase_budget, size_t planned_work) {
+  bool notify_throttled = false;
+  // Grab the heap lock so we can reliably access state variables
+  {
+    ShenandoahHeapLocker locker(lock());
+
+    _phase_label = id;
+    _phase_work = planned_work;
+    _phase_budget = phase_budget;
+    _authorized_to_not_throttle = initial_budget;
+
+    _allocation_requests_throttled = 0;
+    _total_words_throttled = 0;
+    _min_words_throttled = SIZE_MAX;
+    _max_words_throttled = 0;
+    _max_time_throttled = 0.0;
+
+    _allocation_requests_failed = 0;
+    _total_words_failed = 0;
+    _min_words_failed = SIZE_MAX;
+    _max_words_failed = 0.0;
+    _max_time_failed = 0.0;
+
+    _total_time_throttled = 0.0;
+    _total_time_failed = 0.0;
+
+    _phase_carryovers = 0;
+
+    size_t original_queue_length = _throttle_queue_length;
+    intptr_t words_remaining = grant_memory_to_throttled_requests(initial_budget);
+    set_throttle_budget(words_remaining);
+    // if more than half of queued threads were removed from queue, notify all threads
+    if (_throttle_queue_length * 2 <= original_queue_length) {
+      notify_throttled = true;
+    } // Otherwise, we allow each thread to individually wake from sleeping to discover its request has been granted
+  }   // Release the heaplock
+
+  if (notify_throttled) {
+    wake_throttled();
+    notify_throttled_waiters();
+  }
+}
+
+void ShenandoahHeap::absorb_throttle_metrics_and_increment_epoch(size_t progress) {
+
+  if (_phase_label != ShenandoahThrottler::_not_a_label) {
+    // Grab the heap lock so we can reliably access state variables
+    ShenandoahHeapLocker locker(lock());
+
+    increment_throttle_epoch();
+
+    // There may be multiple idle phases in sequence since concurrent old marking masquerades as idle insofar as throttling
+    // is concerned. 
+
+    size_t allocated;
+    if (_phase_label == ShenandoahThrottler::_idle) {
+      allocated = 2 * _authorized_to_not_throttle - _words_not_throttled;
+    } else {
+      allocated = _authorized_to_not_throttle - _words_not_throttled;
+    }
+
+    _log_effort[_phase_label]      += _phase_work;
+    _log_progress[_phase_label]    += progress;
+    _log_budget[_phase_label]       = MAX2(_phase_budget, _log_budget[_phase_label]);
+    _log_authorized[_phase_label]   = MAX2(_authorized_to_not_throttle, _log_authorized[_phase_label]);
+    _log_allocated[_phase_label]   += allocated;
+
+    _log_requests[_phase_label]             += _allocation_requests_throttled;
+    _log_words_throttled[_phase_label]      += _total_words_throttled;
+    _log_min_words_throttled[_phase_label]   = MIN2(_min_words_throttled, _log_min_words_throttled[_phase_label]);
+    _log_max_words_throttled[_phase_label]   = MAX2(_max_words_throttled, _log_max_words_throttled[_phase_label]);
+    _log_max_time_throttled[_phase_label]    = MAX2(_max_time_throttled, _log_max_time_throttled[_phase_label]);
+    _log_total_time_throttled[_phase_label] += _total_time_throttled;
+
+    // Failed throttle requests are requests for which we throttled through an entire GC cycle and still did not
+    // succeed in claiming throttle authority.  So we ultimately force the throttle claim, which has the likely effect
+    // of forcing a degenerated or full GC, with possible out-of-memory condition.
+    _log_failed[_phase_label]            += _allocation_requests_failed;
+    _log_words_failed[_phase_label]      += _total_words_failed;
+    _log_min_words_failed[_phase_label]   = MIN2(_min_words_failed, _log_min_words_failed[_phase_label]);
+    _log_max_words_failed[_phase_label]   = MAX2(_max_words_failed, _log_max_words_failed[_phase_label]);
+    _log_max_time_failed[_phase_label]    = MAX2(_max_time_failed, _log_max_time_failed[_phase_label]);
+    _log_total_time_failed[_phase_label] += _total_time_failed;
+
+    _log_allocatable_at_end[_phase_label] = MAX2(_words_not_throttled, _log_allocatable_at_end[_phase_label]);
+
+    _log_carryovers[_phase_label]        += _phase_carryovers;
+
+    if (_phase_label == ShenandoahThrottler::_update) {
+      double orig_evac_update_factor = throttler()->get_evacuate_vs_update_factor();
+      double new_update_factor = recalibrate_phase_efforts(orig_evac_update_factor);
+      log_metrics_and_prep_for_next(orig_evac_update_factor);
+      throttler()->set_evacuate_vs_update_factor(new_update_factor);
+    }
+  }
+  // else, this is the start of the very first phase, and there is no prior phase to be reported
+}
+
+// Every 16 cycles, check whether the proportions between phase budgets are appropriate
+static const int RECALIBRATE_PERIOD = 16;
+
+double ShenandoahHeap::recalibrate_phase_efforts(double evac_update_factor) {
+  for (int p = ShenandoahThrottler::_idle; p < ShenandoahThrottler::_GCPhase_Count; p++) {
+    _available_sum[p] += _log_allocatable_at_end[p];
+    size_t reqs_stalled = _log_requests[p] + _log_failed[p];
+    size_t words_stalled = _log_words_throttled[p] + _log_words_failed[p];
+
+    if ((_log_carryovers[p] > 0) && (p > ShenandoahThrottler::_idle)) {
+      // Assume all carryovers originated in preceding phase (though they could have originated multiple phases back)
+      _requests_stalled_sum[p] = reqs_stalled - _log_carryovers[p];
+      _requests_stalled_sum[p-1] += _log_carryovers[p];
+      size_t words_per_req = words_stalled / reqs_stalled;
+      size_t carryover_words = _log_carryovers[p] * words_per_req;
+      _words_stalled_sum[p-1] += carryover_words;
+      _words_stalled_sum[p] = words_stalled - carryover_words;
+    } else if (_log_carryovers[p] > 0) {
+      // We'll count carryovers into idle as if they originated during update-refs
+      _requests_stalled_sum[p] = reqs_stalled - _log_carryovers[p];
+      _requests_stalled_sum[ShenandoahThrottler::_update] += _log_carryovers[p];
+      size_t words_per_req = words_stalled / reqs_stalled;
+      size_t carryover_words = _log_carryovers[p] * words_per_req;
+      _words_stalled_sum[ShenandoahThrottler::_update] += carryover_words;
+      _words_stalled_sum[p] = words_stalled - carryover_words;
+    } else {
+      _words_stalled_sum[p] += words_stalled;
+      _requests_stalled_sum[p] += reqs_stalled;
+    }
+  }
+
+  if (++_recalibrate_count >= RECALIBRATE_PERIOD) {
+    if (_words_stalled_sum[ShenandoahThrottler::_update] > _words_stalled_sum[ShenandoahThrottler::_evac]) {
+      if (_words_stalled_sum[ShenandoahThrottler::_evac] / (double) _words_stalled_sum[ShenandoahThrottler::_update] < 0.50) {
+        // _update needs a larger budget
+        evac_update_factor *= 0.9;
+      }
+    } else if (_words_stalled_sum[ShenandoahThrottler::_update] < _words_stalled_sum[ShenandoahThrottler::_evac]) {
+      if (_words_stalled_sum[ShenandoahThrottler::_update] / (double) _words_stalled_sum[ShenandoahThrottler::_evac] < 0.50) {
+        // _evac needs a larger budget
+        evac_update_factor *= 1.1;
+      }
+    } else {
+      // else, we stalled the same in each (probably zero).  Use remaining allocatable to guide recalibration.
+      if (_available_sum[ShenandoahThrottler::_update] > _available_sum[ShenandoahThrottler::_evac]) {
+        if ((_available_sum[ShenandoahThrottler::_evac] >= 0) &&
+            ((_available_sum[ShenandoahThrottler::_evac] / (double) _available_sum[ShenandoahThrottler::_update]) < 0.50)) {
+          // _evac needs a larger budget
+          evac_update_factor *= 1.1;
+        } else if ((_available_sum[ShenandoahThrottler::_update] > 0) && (_available_sum[ShenandoahThrottler::_evac] < 0)) {
+          // evac needs a larger budget
+          evac_update_factor *= 1.1;
+        }
+      } else {
+        // else, we stalled the same in each (probably zero).  Use remaining allocatable to guide recalibration.
+        if (_available_sum[ShenandoahThrottler::_update] > _available_sum[ShenandoahThrottler::_evac]) {
+          if ((_available_sum[ShenandoahThrottler::_evac] >= 0) &&
+              ((_available_sum[ShenandoahThrottler::_evac] / (double) _available_sum[ShenandoahThrottler::_update]) < 0.50)) {
+            // _evac needs a larger budget
+            evac_update_factor *= 1.1;
+          } else if ((_available_sum[ShenandoahThrottler::_update] > 0) && (_available_sum[ShenandoahThrottler::_evac] < 0)) {
+            // evac needs a larger budget
+            evac_update_factor *= 1.1;
+          }
+          // else, leave budgets as is:
+          //  1. _available_sum[update] <= 0: so both are negative
+          //  2. or, _available_sum[evac] >= 0: so both are positive (but ratio does not justify change)
+        } else if (_available_sum[ShenandoahThrottler::_update] < _available_sum[ShenandoahThrottler::_evac]) {
+          if ((_available_sum[ShenandoahThrottler::_update] >= 0) &&
+              ((_available_sum[ShenandoahThrottler::_update] / (double) _available_sum[ShenandoahThrottler::_evac]) < 0.50)) {
+            // _update needs a larger budget
+            evac_update_factor *= 0.9;
+          } else if ((_available_sum[ShenandoahThrottler::_evac] > 0) && (_available_sum[ShenandoahThrottler::_update] < 0)) {
+            // _update needs a larger budget
+            evac_update_factor *= 0.9;
+          }
+          // else, leave budgets as is:
+          //  1. _available_sum[evac <= 0: so both are negative
+          //  2. or, _available_sum[update] >= 0: so both are positive (but ratio does not justify change)
+        }
+        // else, let the status quo remain.
+      }
+      for (int p = ShenandoahThrottler::_idle; p < ShenandoahThrottler::_GCPhase_Count; p++) {
+        _requests_stalled_sum[p] = 0;
+        _words_stalled_sum[p] = 0;
+        _available_sum[p] = 0;
+      }
+      _recalibrate_count = 0;
+    }
+  }
+  return evac_update_factor;
+}
+
+void ShenandoahHeap::add_throttle_request_to_queue(ShenandoahThrottledAllocRequest* new_request) {
+  shenandoah_assert_heaplocked();
+
+  new_request->_next = nullptr;
+  if (_throttle_queue_head == nullptr) {
+    _throttle_queue_head = _throttle_queue_tail = new_request;
+    new_request->_next = nullptr;
+    _throttle_queue_length = 1;
+    _throttle_queue_words = new_request->_requested_words;
+  } else {
+    _throttle_queue_tail->_next = new_request;
+    _throttle_queue_tail = new_request;
+    _throttle_queue_length++;
+    _throttle_queue_words += new_request->_requested_words;
+  }
+}
+
+void ShenandoahHeap::add_to_throttle_budget(size_t budgeted_words) {
+  bool notify_throttled = false;
+  {
+    ShenandoahHeapLocker locker(lock());
+
+    _authorized_to_not_throttle += budgeted_words;
+    budgeted_words += get_throttle_budget();
+    if (budgeted_words > 0) {
+      size_t original_queue_length = throttled_thread_count();
+      budgeted_words = grant_memory_to_throttled_requests(budgeted_words);
+      // if more than half of queued threads were removed from queue, notify all threads
+      if (throttled_thread_count() * 2 <= original_queue_length) {
+        notify_throttled = true;
+      }
+      // Otherwise, we allow each thread to individually wake from its sleep state and discover that its
+      // request has been granted at that time.
+    }
+    set_throttle_budget(budgeted_words);
+  }  // Release the heaplock
+
+  if (notify_throttled) {
+    wake_throttled();
+    notify_throttled_waiters();
+  }
+}
+
+// Record the results of each throttled allocation request.
+void ShenandoahHeap::add_to_throttle_metrics(bool successful, size_t words, double delay, size_t phase_delta) {
+  shenandoah_assert_heaplocked();
+  size_t old_val, new_val;
+  double old_dv, new_dv;
+
+  // We do not distinguish between multiple throttles that spanned one phase, vs, a single throttle that spanned multiple phases.
+  if (phase_delta > 0) {
+    Atomic::add(&_phase_carryovers, phase_delta, memory_order_relaxed);
+  }
+  if (successful) {
+    Atomic::inc(&_allocation_requests_throttled);
+    // _total_words_throttled
+    do {
+      old_val = Atomic::load(&_total_words_throttled);
+      new_val = old_val + words;
+    } while (Atomic::cmpxchg(&_total_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
+
+    // _max_words_throttled
+    do {
+      old_val = Atomic::load(&_max_words_throttled);
+      if (old_val > words) {
+        break;
+      }
+      new_val = words;
+    } while (Atomic::cmpxchg(&_max_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
+
+    // _min_words_throttled
+    do {
+      old_val = Atomic::load(&_min_words_throttled);
+      if (old_val < words) {
+        break;
+      }
+      new_val = words;
+    } while (Atomic::cmpxchg(&_min_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
+
+    // _max_time_throttled
+    do {
+      old_dv = Atomic::load(&_max_time_throttled);
+      if (old_dv > delay) {
+        break;
+      }
+      new_dv = delay;
+    } while (Atomic::cmpxchg(&_max_time_throttled, old_dv, new_dv, memory_order_relaxed) != old_dv);
+
+    // _total_time_throttled
+    do {
+      old_dv = Atomic::load(&_total_time_throttled);
+      new_dv = old_dv + delay;;
+    } while (Atomic::cmpxchg(&_total_time_throttled, old_dv, new_dv, memory_order_relaxed) != old_dv);
+
+  } else {
+    Atomic::inc(&_allocation_requests_failed);
+
+    // _total_words_failed_to_throttle
+    do {
+      old_val = Atomic::load(&_total_words_failed);
+      new_val = old_val + words;
+    } while (Atomic::cmpxchg(&_total_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
+
+    // _max_time_throttled_per_failed_allocation
+    do {
+      old_dv = Atomic::load(&_max_time_failed);
+      if (old_dv > delay) {
+        break;
+      }
+      new_dv = delay;
+    } while (Atomic::cmpxchg(&_max_time_failed, old_dv, new_dv, memory_order_relaxed) != old_dv);
+
+    // _max_words_failed
+    do {
+      old_val = Atomic::load(&_max_words_failed);
+      if (old_val > words) {
+        break;
+      }
+      new_val = words;
+    } while (Atomic::cmpxchg(&_max_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
+
+    // _min_words_failed
+    do {
+      old_val = Atomic::load(&_min_words_failed);
+      if (old_val < words) {
+        break;
+      }
+      new_val = words;
+    } while (Atomic::cmpxchg(&_min_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
+
+
+    // _total_time_failed
+    do {
+      old_dv = Atomic::load(&_total_time_failed);
+      new_dv = old_dv + delay;;
+    } while (Atomic::cmpxchg(&_total_time_failed, old_dv, new_dv, memory_order_relaxed) != old_dv);
+  }
+}
+
+bool ShenandoahHeap::cycle_had_throttles() const {
+  for (int p = ShenandoahThrottler::_idle; p < ShenandoahThrottler::_GCPhase_Count; ++p) {
+    if ((_log_requests[p] > 0) || (_log_failed[p] > 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ShenandoahHeap::remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request) {
+  shenandoah_assert_heaplocked();
+
+  ShenandoahThrottledAllocRequest *predecessor = _throttle_queue_head;
+  while ((predecessor != nullptr) && (predecessor->_next != forced_request)) {
+    predecessor = predecessor->_next;
+  }
+  predecessor->_next = forced_request->_next;
+  forced_request->_next = nullptr;
+
+  _throttle_queue_length--;
+  _throttle_queue_words -= forced_request->_requested_words;
+}
+
+
+// Distribute newly available memory to throttled threads.  For each thread whose request is granted, remove it from queue.
+// Return the remnant number of words that were not allotted to any queueud throttle requests
+intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_words) {
+  shenandoah_assert_heaplocked();
+
+  ShenandoahThrottledAllocRequest *request, *predecessor;
+  while ((_throttle_queue_head != nullptr) && (_throttle_queue_head->_requested_words <= available_words)) {
+    size_t requested_words = _throttle_queue_head->_requested_words;
+    available_words -= requested_words;
+    request = _throttle_queue_head;
+    _throttle_queue_head = request->_next;
+    if (_throttle_queue_head == nullptr) {
+      _throttle_queue_tail = nullptr;
+    }
+
+    request->_is_granted = true;
+    request->_next = nullptr;
+
+    _throttle_queue_length--;
+    _throttle_queue_words -= requested_words;
+  }
+
+  request = _throttle_queue_head;
+  while ((available_words > 0) && (request != nullptr)) {
+    // See if there are any other pending requests on the queue that can be satisfied even if the first entry(ies) on the
+    // queue may need more memory than remaining available_words
+
+    while ((request != nullptr) && (request->_requested_words > available_words)) {
+      predecessor = request;
+      request = request->_next;
+    }
+
+    while ((request != nullptr) && (request->_requested_words <= available_words)) {
+      size_t requested_words = request->_requested_words;
+      available_words -= requested_words;
+
+      predecessor->_next = request->_next;
+      if (predecessor->_next == nullptr) {
+        _throttle_queue_tail = predecessor;
+      }
+
+      request->_is_granted = true;
+      request->_next = nullptr;
+
+      _throttle_queue_length--;
+      _throttle_queue_words -= requested_words;
+
+      request = predecessor->_next;
+    }
+  }
+  return available_words;
+}
+
+#ifdef ASSERT
+static bool is_power_of_two(size_t arg) {
+  for (size_t candidate = 2; candidate <= arg; candidate *= 2) {
+    if (candidate == arg) {
+      return true;
+    } else if (candidate > SIZE_MAX / 2) {
+      return false;
+    }
+  }
+  return false;
+}
+#endif
+
+void ShenandoahHeap::notify_throttled_waiters() {
+  if (_need_notify_waiters.try_unset()) {
+    MonitorLocker locker(_throttle_wait_monitor);
+    _throttle_wait_monitor->notify_all();
+  }
+}
+
+// Perform timed wait. Works like sleep(), except without modifying thread interruptible status.
+// MonitorLocker also checks for safepoints.                                                     
+void ShenandoahHeap::wait_in_throttle(size_t time_ms) {
+  assert(time_ms > 0, "Should not call this with zero argument, as it would stall until notify");
+  assert(time_ms <= LONG_MAX, "Sanity");
+  assert(is_power_of_two(time_ms), "efficiency hack");
+
+  MonitorLocker locker(_throttle_wait_monitor);
+  // Randomize delay so that we don't have all throttled threads piling on to a contended heap lock.
+  // Note that the starts of throttling requests tend to cluster around events such as start of GC phase, where many mutators
+  // need to refresh their TLABs and all threads already in a throttling state get notified.
+  long scattered_ms = (rand() & (time_ms - 1)) + 1;
+  _throttle_wait_monitor->wait(scattered_ms);
+}
+
+#define FORMAT_WORDS(x)  byte_size_in_proper_unit(((x) == (SIZE_MAX))? 0: (x) << LogHeapWordSize), \
+                         proper_unit_for_byte_size(((x) == (SIZE_MAX))? 0: (x) << LogHeapWordSize)
+
+void ShenandoahHeap::log_metrics_and_prep_for_next(double evac_update_factor) {
+  log_info(gc, ergo)("Throttle report (evac vs update factor: %.3f)", evac_update_factor);
+  log_info(gc, ergo)("%6s  %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %11s %11s %8s %8s %8s %8s %11s %11s %8s",
+                     "Phase", "Effort", "Progress", "Budget", "Alloted", "Alloced", "Avail", "GoodReqs", "Bytes", "Min", "Max",
+                     "MaxTime", "TotTime", "BadReqs", "Bytes", "Min", "Max", "MaxTime", "TotTime", "Overflow");
+  for (int p = ShenandoahThrottler::_idle; p <= ShenandoahThrottler::_update; p++) {
+    size_t allocatable = (size_t) _log_allocatable_at_end[p];
+    log_info(gc, ergo)("%6s: " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
+                       SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s "
+                       SIZE_FORMAT_W(7) "%s "
+                       SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
+                       SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8),
+                       ShenandoahThrottler::phase_name((ShenandoahThrottler::GCPhase) p),
+                       FORMAT_WORDS(_log_effort[p]), FORMAT_WORDS(_log_progress[p]),
+                       FORMAT_WORDS(_log_budget[p]), FORMAT_WORDS(_log_authorized[p]), FORMAT_WORDS(_log_allocated[p]),
+                       FORMAT_WORDS(allocatable), _log_requests[p], FORMAT_WORDS(_log_words_throttled[p]),
+                       FORMAT_WORDS(_log_min_words_throttled[p]), FORMAT_WORDS(_log_max_words_throttled[p]),
+                       _log_max_time_throttled[p], _log_total_time_throttled[p],
+                       _log_failed[p], FORMAT_WORDS(_log_words_failed[p]), FORMAT_WORDS(_log_min_words_failed[p]),
+                       FORMAT_WORDS(_log_max_words_failed[p]),
+                       _log_max_time_failed[p], _log_total_time_failed[p], _log_carryovers[p]);
+
+    _log_effort[p]       = 0;
+    _log_progress[p]     = 0;
+    _log_budget[p]       = 0;
+    _log_authorized[p]   = 0;
+    _log_allocated[p]    = 0;
+
+    _log_requests[p]             = 0;
+    _log_words_throttled[p]      = 0;
+    _log_min_words_throttled[p]  = SIZE_MAX;
+    _log_max_words_throttled[p]  = 0;
+    _log_max_time_throttled[p]   = 0.0;
+    _log_total_time_throttled[p] = 0.0;
+
+    _log_failed[p]               = 0;
+    _log_words_failed[p]         = 0;
+    _log_min_words_failed[p]     = SIZE_MAX;
+    _log_max_words_failed[p]     = 0;
+    _log_max_time_failed[p]      = 0.0;
+    _log_total_time_failed[p]    = 0.0;
+
+    _log_allocatable_at_end[p]   = 0;
+    _log_carryovers[p]           = 0;
+  }
+}
+
+// Don't allow any allocation to make the budget negative, unless force.
+// Don't let a very large allocation consume more than half the remaining budget unless allow_greed
+//  If a thread wants more than half of remaining budget, we'll throttle it at least once so that
+//  multiple less greedy threads have a chance to proceed before memory is granted to this thread.
+bool ShenandoahHeap::claim_throttled_for_alloc(intptr_t words, bool force, bool allow_greed) {
+  assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
+  shenandoah_assert_heaplocked();
+
+  // We do not allow thread to allocate more than half of remaining available words unless allow_greed
+  intptr_t new_budget = _words_not_throttled - words;
+  if (((new_budget < 0) && !force) || ((new_budget < words) && !allow_greed)) {
+    return false;
+  }
+  _words_not_throttled = new_budget;
+  return true;
+}
+
+// Unthrottle when an authorized allocation consumes less than was authorized.
+void ShenandoahHeap::unthrottle_for_alloc(ShenandoahThrottledAllocRequest* original_req, intptr_t excess_words) {
+  assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
+  shenandoah_assert_heaplocked();
+
+  if (throttle_epoch() != original_req->_epoch_at_start) {
+    // Stale ticket, no need to unthrottle
+    return;
+  }
+  intptr_t words = get_throttle_budget() + excess_words;
+  size_t original_queue_length = throttled_thread_count();
+  words = grant_memory_to_throttled_requests(words);
+  set_throttle_budget(words);
+  if (throttled_thread_count() * 2 <= original_queue_length) {
+    // Plan to notify all throttled threads if we granted memory to more than half of previously throttled threads.
+    // But we don't notify from here because we are holding the heap lock.
+    wake_throttled();
   }
 }
