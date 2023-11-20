@@ -76,26 +76,19 @@ void ShenandoahRegulatorThread::regulate_concurrent_cycles() {
         if (request_concurrent_gc(ShenandoahControlThread::select_global_generation())) {
           log_info(gc)("Heuristics request for global (unload classes) accepted.");
         }
-#ifdef KELVIN_DEPRECATE
-      } else {
-        if (_young_heuristics->should_start_gc()) {
-          if (start_old_cycle()) {
-            log_info(gc)("Heuristics request for old collection accepted");
-          } else if (request_concurrent_gc(YOUNG)) {
-            log_info(gc)("Heuristics request for young collection accepted");
-          }
-        }
-#else
       } else if (start_young_cycle()) {
         // When both young and old are pending, do young.  That's more urgent.
         log_info(gc)("Heuristics request for young collection accepted");
       } else if (start_old_cycle()) {
+
+        // KELVIN REPLACE THIS CODE WITH UPSTREAM PR THAT DOES C&F AT END OF
+        // OLD MARKING if upstream is different than what's here
+
         // Would be better if we could ONLY start the c&f work here, and then
         // wait until the first young trigger that follows completion of the c&f
         // work before we do the bootstrap cycle.
         log_info(gc)("Heuristics request for old collection accepted");
       }
-#endif
     } else if (mode == ShenandoahControlThread::servicing_old) {
       if (start_young_cycle()) {
         log_info(gc)("Heuristics request to interrupt old for young collection accepted");

@@ -1411,15 +1411,6 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
       pacer()->pace_for_alloc(req.size());
       pacer_epoch = pacer()->epoch();
     }
-#ifdef KELVIN_DEPRECATE
- else if (ShenandoahThrottleAllocations) {
-      size_t authorized_size = throttler()->throttle_for_alloc(req);
-      pacer_epoch = throttler()->epoch();
-      if (authorized_size < req.size()) {
-        use_surrogate_req = true;
-      }
-    }
-#endif
     if (!ShenandoahAllocFailureALot || !should_inject_alloc_failure()) {
       result = allocate_memory_under_lock(req, in_new_region, is_promotion);
     }

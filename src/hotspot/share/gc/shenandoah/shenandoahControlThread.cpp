@@ -430,11 +430,6 @@ void ShenandoahControlThread::process_phase_timings(const ShenandoahHeap* heap) 
   if (ShenandoahPacing) {
     heap->pacer()->flush_stats_to_cycle();
   }
-#ifdef KELVIN_DEPRECATE
-  else if (ShenandoahThrottleAllocations) {
-    heap->throttler()->flush_stats_to_cycle();
-  }
-#endif
 
   ShenandoahEvacuationTracker* evac_tracker = heap->evac_tracker();
   ShenandoahCycleStats         evac_stats   = evac_tracker->flush_cycle_to_global();
@@ -451,11 +446,6 @@ void ShenandoahControlThread::process_phase_timings(const ShenandoahHeap* heap) 
       if (ShenandoahPacing) {
         heap->pacer()->print_cycle_on(&ls);
       }
-#ifdef KELVIN_DEPRECATE
-      else if (ShenandoahThrottleAllocations) {
-        heap->throttler()->print_cycle_on(&ls);
-      }
-#endif
     }
   }
 
