@@ -4091,13 +4091,16 @@ void ShenandoahHeap::add_throttle_request_to_queue(ShenandoahThrottledAllocReque
 
 void ShenandoahHeap::remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request) {
   shenandoah_assert_heaplocked();
+  assert(_throttle_queue_length >= 1, "Queue length cannot be zero");
 
   ShenandoahThrottledAllocRequest *predecessor = forced_request->_prev;
   ShenandoahThrottledAllocRequest *successor = forced_request->_next;
   if (_throttle_queue_head == forced_request) {
+    // Note: successor equals nullptr if resulting queue is empty
     _throttle_queue_head = successor;
   }
   if (_throttle_queue_tail == forced_request) {
+    // Note: predecessor equals nullptr if resulting queue is empty
     _throttle_queue_tail = predecessor;
   }
   if (predecessor != nullptr) {
@@ -4143,6 +4146,7 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
       _throttle_queue_length = 0;
     } else {
       _throttle_queue_head->_prev = nullptr;
+      assert(_throttle_queue_length >= 1, "Cannot remove entry from throttle queue unless length >= 1");
       _throttle_queue_length--;
     }
     request->_is_granted = true;
@@ -4170,12 +4174,11 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
       predecessor->_next = candidate->_next;
       if (predecessor->_next == nullptr) {
         _throttle_queue_tail = predecessor;
-        _throttle_queue_min_words = 0;
-        _throttle_queue_length = 0;
       } else {
         predecessor->_next->_prev = predecessor;
-        _throttle_queue_length--;
       }
+      assert(_throttle_queue_length >= 1, "Cannot remove entry from throttle queue unless length >= 1");
+      _throttle_queue_length--;
 
       candidate->_is_granted = true;
       candidate->_next = nullptr;
