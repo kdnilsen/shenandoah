@@ -439,7 +439,7 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
       _acceleration_goodness_ratio *= 1.12;     // increase sensitivity by 12%
     }
     _consecutive_goodness = 0;
-    _consecutive_goodness_sample_size = 6;      // decrease sensitiivty (again) after 6 more good cycles
+    _consecutive_goodness_sample_size = 8;      // decrease sensitiivty (again) after 16 more good cycles
   } else {
     // step <= 0: all is well.
     //
@@ -458,10 +458,10 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
       // We've seen many good cycles in a row.
       _acceleration_goodness_ratio *= 0.96;       // decrease sensitivity by 4%
       _consecutive_goodness = 0;
-      if (_consecutive_goodness_sample_size <= 12) {
+      // Wait no longer that 32 cycles before decreasing sensitivity another time
+      if (_consecutive_goodness_sample_size <= 16) {
         _consecutive_goodness_sample_size *= 2;   // wait twice as long before decreasing sensitivity again
       }
-      // Wait no longer that 24 cycles before decreasing sensitivity another time
     }
   }
 
