@@ -466,6 +466,10 @@ inline oop ShenandoahHeap::try_evacuate_object(oop p, Thread* thread, Shenandoah
       }
     }
 
+#undef KELVIN_FAILURE
+#ifdef KELVIN_FAILURE
+    log_info(gc)("try_evacuate_object experiences allooc failure");
+#endif
     control_thread()->handle_alloc_failure_evac(size);
 
     _oom_evac_handler.handle_out_of_memory_during_evacuation();

@@ -1432,6 +1432,10 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
     // This will notify the collector to start a cycle, but will raise
     // an OOME to the mutator if the last Full GCs have not made progress.
     if (result == nullptr && !req.is_lab_alloc() && get_gc_no_progress_count() > ShenandoahNoProgressThreshold) {
+#undef KELVIN_FAILURE
+#ifdef KELVIN_FAILURE
+      log_info(gc)("allocate_memory experiences allooc failure");
+#endif
       control_thread()->handle_alloc_failure(req, false);
       return nullptr;
     }
@@ -1446,6 +1450,9 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
     size_t original_count = shenandoah_policy()->full_gc_count();
     while (result == nullptr
         && (get_gc_no_progress_count() == 0 || original_count == shenandoah_policy()->full_gc_count())) {
+#ifdef KELVIN_FAILURE
+      log_info(gc)("allocate_memory recovery experiences allooc failure");
+#endif
       control_thread()->handle_alloc_failure(req);
       result = allocate_memory_under_lock(req, in_new_region, is_promotion);
     }
@@ -1506,13 +1513,22 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
   ShenandoahThrottledAllocRequest throttled_request;
   size_t current_throttle_pause = MIN_THROTTLE_DELAY_MS;
 
+#undef KELVIN_ALLOC
+#ifdef KELVIN_ALLOC
+  log_info(gc)("alloc_mem_under_lock(is_mutator: %s, size: " SIZE_FORMAT ")",
+               req.is_mutator_alloc()? "true": "false", req.size());
+#endif
+
   while (true) {
     while (true) {
       {
         ShenandoahHeapLocker locker(lock());
         size_t words = req.size();
 
-        if (ShenandoahThrottleAllocations) {
+        if (ShenandoahThrottleAllocations && req.is_mutator_alloc()) {
+#ifdef KELVIN_ALLOC
+          log_info(gc)("at top of control for throttling");
+#endif
           if (throttling) {
             // This is second (or a subsequent) iteration through this loop, having already initalized throttled_request.
             if (throttled_request._force_claim) {
@@ -1556,10 +1572,16 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
               break;
             }
           } else if (claim_throttled_for_alloc(words, false)) {
+#ifdef KELVIN_ALLOC
+            log_info(gc)("Not throttling and successfully claimed words: " SIZE_FORMAT, words);
+#endif
             // Our request is granted without requring any throttle.
             // Fall through to execute regular allocation code below.
           } else {
             JavaThread* current_thread = JavaThread::current();
+#ifdef KELVIN_ALLOC
+            log_info(gc)("Going to set up throttled request");
+#endif
             if (current_thread->is_attaching_via_jni() || !current_thread->is_active_Java_thread()) {
               if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
                 // Since we're in a throttling situation, make our TLAB request more conservative
@@ -1571,6 +1593,11 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
               assert(claimed, "Forceful claim should always succeed");
               // fall through to execute regular allocation code below
             } else {
+
+#ifdef KELVIN_ALLOC
+              log_info(gc)("alloc_mem_under_lock() needs to throttle %s becase failed to claim",
+                           req.is_lab_alloc()? "tlab": "shared");
+#endif
               throttling = true;
               throttled_request._current_thread = current_thread;
               throttled_request._start_throttle_time = UninitializedTime;  // fetch start time below, without lock
@@ -1589,10 +1616,19 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
               throttled_request._is_politely_deferred = request_is_greedy(words);
               add_throttle_request_to_queue(&throttled_request);
               // break out of loop so we can throttle without holding Heap Lock.
+#ifdef KELVIN_ALLOC
+              log_info(gc)("Having queued throttle request, breaking out of loop so I can throttle");
+#endif
               break;
             }
           }
         } // This ends the special code for ShenandoahThrottleAllocations
+
+
+#ifdef KELVIN_ALLOC
+        log_info(gc)("Done with throttling distractions, now I am going to do the allocation, use_surrogate: %s, words: "
+                     SIZE_FORMAT, use_surrogate? "true": "false", words);
+#endif
 
         // promotion_eligible pertains only to PLAB allocations, denoting that the PLAB is allowed to allocate for promotions.
         bool promotion_eligible = false;
@@ -1607,10 +1643,19 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
 
         if (mode()->is_generational()) {
           if (the_req.affiliation() == YOUNG_GENERATION) {
+#ifdef KELVIN_ALLOC
+            log_info(gc)("affiliation is YOUNG!");
+#endif
             if (the_req.is_mutator_alloc()) {
               size_t young_words_available = young_generation()->available() / HeapWordSize;
-              if ((ShenandoahElasticTLAB && the_req.is_lab_alloc() && (the_req.min_size() < young_words_available)) ||
+              if ((ShenandoahElasticTLAB && the_req.is_lab_alloc() && (the_req.min_size() > young_words_available)) ||
                   (the_req.size() > young_words_available)) {
+
+#ifdef KELVIN_ALLOC
+                log_info(gc)("Rejecting mutator alloc: size: " SIZE_FORMAT ", min_size: " SIZE_FORMAT ", avail: " SIZE_FORMAT,
+                             the_req.size(), the_req.is_lab_alloc()? the_req.min_size(): the_req.size(), young_words_available);
+#endif
+
                 if (ShenandoahThrottleAllocations) {
                   unthrottle_for_alloc(&throttled_request, the_req.size());
                 }
@@ -1618,6 +1663,11 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
               }
             }
           } else {                    // reg.affiliation() == OLD_GENERATION
+#ifdef KELVIN_ALLOC
+            log_info(gc)("affiliation is OLD!");
+#endif
+
+
             assert(the_req.type() != ShenandoahAllocRequest::_alloc_gclab, "GCLAB pertains only to young-gen memory");
             if (the_req.type() ==  ShenandoahAllocRequest::_alloc_plab) {
               plab_alloc = true;
@@ -1655,9 +1705,19 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
           }
         } // This ends the is_generational() block
 
+#ifdef KELVIN_ALLOC
+        log_info(gc)("Alloc not rejected by is_generational block, allow: %s, in_new_region: %s",
+                     allow_allocation? "true": "false", in_new_region? "true": "false");
+#endif
+
         // First try the original request.  If TLAB request size is greater than available, allocate() will attempt to downsize
         // request to fit within available memory.
         result = (allow_allocation)? _free_set->allocate(the_req, in_new_region): nullptr;
+
+#ifdef KELVIN_ALLOC
+        log_info(gc)("_free_set allocate() returned: " PTR_FORMAT, p2i(result));
+#endif
+
         if (result != nullptr) {
           if (the_req.is_old()) {
             ShenandoahThreadLocalData::reset_plab_promoted(thread);
@@ -1736,12 +1796,22 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
             claim_throttled_for_alloc(req.actual_size() - the_req.size(), true);
           }
         }
+#ifdef KELVIN_ALLOC
+        log_info(gc)("returning result: " PTR_FORMAT, p2i(result));
+        log_info(gc)("");
+#endif
         return result;
       
       } // This closes the block that holds the heap lock, releasing the lock.
     }   // This closes the inner nested infinite loop.  We break out of the inner-nested loop so we can throttle
 
+
+
     // What follows is in-lined implementation of what used to be called throttle_for_alloc()
+
+#ifdef KELVIN_ALLOC
+    log_info(gc)("alloc_mem_under_lock() is going to throttle " SIZE_FORMAT, req.size());
+#endif
     
     // We only reach here if we desire to throttle an allocation request.
     if (throttled_request._start_throttle_time == UninitializedTime) {
@@ -1757,8 +1827,9 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
     if (!throttled_request._is_granted && (throttle_epoch() - throttled_request._epoch_at_start > 6)) {
       throttled_request._force_claim = true;
     }
-    if (throttled_request._is_granted || throttled_request._force_claim) {
-      // We're about to perform the allocation
+    if (throttled_request._is_granted || throttled_request._force_claim || throttled_request._is_politely_deferred) {
+      // We may be about to perform the allocation.  If is_politely_deferred, we may not allocate on this pass,
+      // but just in case we do, we have the _end_throttle_time available.
       throttled_request._end_throttle_time = os::elapsedTime();
 
       // We don't use the information gathered by the folllowing commented out code, but it might be of value if we want
@@ -4053,12 +4124,20 @@ void ShenandoahHeap::remove_throttled_request_from_queue(ShenandoahThrottledAllo
 }
 
 
+#define KELVIN_METRICS
+
 // Distribute newly available memory to throttled threads.  For each thread whose request is granted, remove it from queue.
 // Return the remnant number of words that were not allotted to any queueud throttle requests
 intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_words) {
   shenandoah_assert_heaplocked();
 
   ShenandoahThrottledAllocRequest *request, *predecessor, *candidate;
+
+#ifdef KELVIN_METRICS
+  size_t init_length = _throttle_queue_length;
+  size_t init_min_words =  _throttle_queue_min_words;
+  size_t init_avail = available_words;
+#endif
 
   // Grant memory to as many leading entries on the queue as budget allows
   while (( available_words > (intptr_t) _throttle_queue_min_words) && 
@@ -4119,6 +4198,13 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
     // We've examined every element that remains in the queue
     _throttle_queue_min_words = minimum_request_seen;
   }
+
+#ifdef KELVIN_METRICS
+  log_info(gc)("Grant memory(" SIZE_FORMAT ") changed queue length from " SIZE_FORMAT " to " SIZE_FORMAT ", min_request from "
+               SIZE_FORMAT " to " SIZE_FORMAT " with remnant: " SIZE_FORMAT,
+               init_avail, init_length, _throttle_queue_length, init_min_words, _throttle_queue_min_words, available_words);
+#endif
+
   return available_words;
 }
 
@@ -4154,93 +4240,31 @@ void ShenandoahHeap::add_to_throttle_metrics(bool successful, size_t words, doub
   size_t old_val, new_val;
   double old_dv, new_dv;
 
+#ifdef KELVIN_METRICS
+  if (delay < 0) {
+    log_info(gc)("Not expecting negative delay: %.6f for %s alloc, words: " SIZE_FORMAT " with phase_delta: " SIZE_FORMAT,
+                 delay, successful? "successful": "failed", words, phase_delta);
+  }
+#endif
+
   // We do not distinguish between multiple throttles that spanned one phase, vs, a single throttle that spanned multiple phases.
   if (phase_delta > 0) {
-    Atomic::add(&_phase_carryovers, phase_delta, memory_order_relaxed);
+    _phase_carryovers += phase_delta;
   }
   if (successful) {
-    Atomic::inc(&_allocation_requests_throttled);
-    // _total_words_throttled
-    do {
-      old_val = Atomic::load(&_total_words_throttled);
-      new_val = old_val + words;
-    } while (Atomic::cmpxchg(&_total_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _max_words_throttled
-    do {
-      old_val = Atomic::load(&_max_words_throttled);
-      if (old_val > words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_max_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _min_words_throttled
-    do {
-      old_val = Atomic::load(&_min_words_throttled);
-      if (old_val < words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_min_words_throttled, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _max_time_throttled
-    do {
-      old_dv = Atomic::load(&_max_time_throttled);
-      if (old_dv > delay) {
-        break;
-      }
-      new_dv = delay;
-    } while (Atomic::cmpxchg(&_max_time_throttled, old_dv, new_dv, memory_order_relaxed) != old_dv);
-
-    // _total_time_throttled
-    do {
-      old_dv = Atomic::load(&_total_time_throttled);
-      new_dv = old_dv + delay;;
-    } while (Atomic::cmpxchg(&_total_time_throttled, old_dv, new_dv, memory_order_relaxed) != old_dv);
-
+    _allocation_requests_throttled++;
+    _total_words_throttled += words;
+    _max_words_throttled = MAX2(_max_words_throttled, words);
+    _min_words_throttled = MIN2(_min_words_throttled, words);
+    _max_time_throttled= MAX2(_max_time_throttled, delay);
+    _total_time_throttled += delay;
   } else {
-    Atomic::inc(&_allocation_requests_failed);
-
-    // _total_words_failed_to_throttle
-    do {
-      old_val = Atomic::load(&_total_words_failed);
-      new_val = old_val + words;
-    } while (Atomic::cmpxchg(&_total_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _max_time_throttled_per_failed_allocation
-    do {
-      old_dv = Atomic::load(&_max_time_failed);
-      if (old_dv > delay) {
-        break;
-      }
-      new_dv = delay;
-    } while (Atomic::cmpxchg(&_max_time_failed, old_dv, new_dv, memory_order_relaxed) != old_dv);
-
-    // _max_words_failed
-    do {
-      old_val = Atomic::load(&_max_words_failed);
-      if (old_val > words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_max_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
-
-    // _min_words_failed
-    do {
-      old_val = Atomic::load(&_min_words_failed);
-      if (old_val < words) {
-        break;
-      }
-      new_val = words;
-    } while (Atomic::cmpxchg(&_min_words_failed, old_val, new_val, memory_order_relaxed) != old_val);
-
-
-    // _total_time_failed
-    do {
-      old_dv = Atomic::load(&_total_time_failed);
-      new_dv = old_dv + delay;;
-    } while (Atomic::cmpxchg(&_total_time_failed, old_dv, new_dv, memory_order_relaxed) != old_dv);
+    _allocation_requests_failed++;
+    _total_words_failed += words;
+    _max_words_failed = MAX2(_max_words_failed, words);
+    _min_words_failed = MIN2(_min_words_failed, words);
+    _max_time_failed = MAX2(_max_time_failed, delay);
+    _total_time_failed += delay;
   }
 }
 
