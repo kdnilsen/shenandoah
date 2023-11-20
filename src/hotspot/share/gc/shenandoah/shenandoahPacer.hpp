@@ -233,10 +233,14 @@ public:
     _not_a_label                // Sentinel value
   };
 
-  enum MicroGCPhase {           // Divide each GC Phase into three micro-cycles
+  // More microcycles requires more frequent coordination between throttler and ShenandoahHeap locker.
+  // Fewer microcycles results in longer delays between released traunches of memory, longer total pause times.
+  enum MicroGCPhase {           // Divide each GC Phase into five micro-cycles
     _first_microphase,
     _second_microphase,
     _third_microphase,
+    _fourth_microphase,
+    _fifth_microphase,
     _Microphase_Count
   };
 
