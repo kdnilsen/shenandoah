@@ -3920,7 +3920,7 @@ void ShenandoahHeap::start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id
     intptr_t words_remaining = grant_memory_to_throttled_requests(initial_budget);
     set_throttle_budget(words_remaining);
     // if more than half of queued threads were removed from queue, notify all threads
-    if (_throttle_queue_length * 2 <= original_queue_length) {
+    if (_throttle_queue_length * 2 < original_queue_length) {
       notify_throttled = true;
     } // Otherwise, we allow each thread to individually wake from sleeping to discover its request has been granted
   }   // Release the heaplock
@@ -4219,7 +4219,7 @@ void ShenandoahHeap::add_to_throttle_budget(size_t budgeted_words) {
       size_t original_queue_length = throttled_thread_count();
       budgeted_words = grant_memory_to_throttled_requests(budgeted_words);
       // if more than half of queued threads were removed from queue, notify all threads
-      if (throttled_thread_count() * 2 <= original_queue_length) {
+      if (throttled_thread_count() * 2 < original_queue_length) {
         notify_throttled = true;
       }
       // Otherwise, we allow each thread to individually wake from its sleep state and discover that its
@@ -4389,12 +4389,17 @@ void ShenandoahHeap::unthrottle_for_alloc(ShenandoahThrottledAllocRequest* origi
     return;
   }
   intptr_t words = get_throttle_budget() + excess_words;
-  size_t original_queue_length = throttled_thread_count();
-  words = grant_memory_to_throttled_requests(words);
-  set_throttle_budget(words);
-  if (throttled_thread_count() * 2 <= original_queue_length) {
-    // Plan to notify all throttled threads if we granted memory to more than half of previously throttled threads.
-    // But we don't notify from here because we are holding the heap lock.
-    wake_throttled();
+  if (words > 0) {
+    size_t original_queue_length = throttled_thread_count();
+    words = grant_memory_to_throttled_requests(words);
+    set_throttle_budget(words);
+    if (throttled_thread_count() * 2 < original_queue_length) {
+      // Plan to notify all throttled threads if we granted memory to more than half of previously throttled threads.
+      // But we don't notify from here because we are holding the heap lock.
+
+      // NB: The most common case is original_queue_length is zero.  That condition will trigger wake_throttled on
+      // every invocation if we use <= comparison.
+      wake_throttled();
+    }
   }
 }
