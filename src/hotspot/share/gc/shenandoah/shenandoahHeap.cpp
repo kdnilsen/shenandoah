@@ -922,11 +922,7 @@ void ShenandoahHeap::notify_mutator_alloc_words(size_t words, size_t waste) {
     if (waste > 0) {
       pacer()->claim_for_alloc(waste, true);
     }
-  } else if (ShenandoahThrottleAllocations) {
-    if (waste > 0) {
-      claim_throttled_for_alloc(waste, true);
-    }
-  }
+  } // The ShenandoahThrottleAllocations is handled inside allocate_memory_under_lock()
 }
 
 size_t ShenandoahHeap::capacity() const {
