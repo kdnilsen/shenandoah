@@ -1716,10 +1716,13 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
           req.set_actual_size(the_req.actual_size());
         }
         if (ShenandoahThrottleAllocations && req.is_mutator_alloc()) {
-          if (req.actual_size() < the_req.size()) {
+          if (result == nullptr) {
+            // We had throttling approval for the_req.size(), but we consumed zero
+            unthrottle_for_alloc(&throttled_request, the_req.size());
+          } else if (the_req.actual_size() < the_req.size()) {
             // We had throttling approval for the_req.size(), but we consumed less
             unthrottle_for_alloc(&throttled_request, the_req.size() - the_req.actual_size());
-          } else if (req.actual_size() > the_req.size()) {
+          } else if (the_req.actual_size() > the_req.size()) {
             // Force the claim for extra memory allocated
             claim_throttled_for_alloc(req.actual_size() - the_req.size(), true);
           }
