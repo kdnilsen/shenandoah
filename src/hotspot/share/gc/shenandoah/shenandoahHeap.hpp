@@ -980,7 +980,7 @@ private:
 
   // Adjusted with every allocation, unthrottle_request, and with every increase of authorized, how many words
   // can be allocated without throttling?
-  intptr_t _words_not_throttled;
+  intptr_t _words_to_not_throttle;
 
   // Minimum time to wait in a single throttle delay.   When a thread finds that it cannot claim authorization for
   // a requested allocation, it first delays this amount.  If, after waiting, it still cannot claim authorization for
@@ -1003,11 +1003,11 @@ private:
   }
 
   inline intptr_t get_throttle_budget() {
-    return _words_not_throttled;
+    return _words_to_not_throttle;
   }
 
   inline void set_throttle_budget(intptr_t words) {
-    _words_not_throttled = words;
+    _words_to_not_throttle = words;
   }
 
   void add_to_throttle_metrics(bool successful, size_t words, double delay, size_t phase_delta);
@@ -1037,7 +1037,7 @@ private:
 
   // A request is greedy if it consumes more than half of what remains in the throttle_budget
   inline bool request_is_greedy(intptr_t words) {
-    return (words * 2 > _words_not_throttled);
+    return (words * 2 > _words_to_not_throttle);
   }
 
   bool claim_throttled_for_alloc(intptr_t words, bool force, bool allow_greed = false);

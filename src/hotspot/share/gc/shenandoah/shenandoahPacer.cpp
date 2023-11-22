@@ -439,13 +439,13 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
   assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   // Note that we typically overbudget work for marking by a factor of 2 (so all work is completed at ~50% of projected)
-  _work_completed[_first_microphase]  = (size_t) (0.125 * projected_work);   // first 1/8 of projected work
+  _work_completed[_first_microphase]  = (size_t) (0.125 * projected_work);   // 1/8 of projected work
   _work_completed[_second_microphase] = (size_t) (0.250 * projected_work);   // 1/8 more
   _work_completed[_third_microphase]  = (size_t) (0.375 * projected_work);   // 1/8 more
   _work_completed[_fourth_microphase] = (size_t) (0.500 * projected_work);   // 1/8 more
   _work_completed[_fifth_microphase]  = (size_t) (0.625 * projected_work);   // 1/8 more
 
-  // Initial allocation budget is 0.5 * phase_budget
+  // Initial allocation budget is 0.25 * phase_budget
   intptr_t initial_budget = phase_budget / 2;
   _budget_supplement[_first_microphase]  = (size_t) (0.2500 * phase_budget);   // Cumulative budget = 0.7500 * phase_budget
   _budget_supplement[_second_microphase] = (size_t) (0.0625 * phase_budget);   // Cumulative budget = 0.8125 * phase_budget
@@ -515,11 +515,11 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
 
   assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
-  _work_completed[_first_microphase]  = (size_t) (0.250 * projected_work);  // first 1/4 of projected work
+  _work_completed[_first_microphase]  = (size_t) (0.250 * projected_work);  // 1/4 of projected work
   _work_completed[_second_microphase] = (size_t) (0.375 * projected_work);  // 1/8 more
-  _work_completed[_third_microphase]  = (size_t) (0.500 * projected_work);  // 1/8 more
-  _work_completed[_fourth_microphase] = (size_t) (0.625 * projected_work);  // 1/8 more
-  _work_completed[_fifth_microphase]  = (size_t) (0.750 * projected_work);  // 1/8 more
+  _work_completed[_third_microphase]  = (size_t) (0.5000 * projected_work);  //  1/8 more
+  _work_completed[_fourth_microphase] = (size_t) (0.6250 * projected_work);  //  1/8 more
+  _work_completed[_fifth_microphase]  = (size_t) (0.7500 * projected_work);  //  1/8 more
 
   // Initial allocation budget is 0.5 * phase_budget
   size_t initial_budget = phase_budget / 2;
@@ -561,7 +561,7 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
 
   assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
-  _work_completed[_first_microphase]  = (size_t) (0.250 * projected_work);  // first 1/4 of projected work
+  _work_completed[_first_microphase]  = (size_t) (0.250 * projected_work);  // 1/4 of projected work
   _work_completed[_second_microphase] = (size_t) (0.375 * projected_work);  // 1/8 more
   _work_completed[_third_microphase]  = (size_t) (0.500 * projected_work);  // 1/8 more
   _work_completed[_fourth_microphase] = (size_t) (0.625 * projected_work);  // 1/8 more
