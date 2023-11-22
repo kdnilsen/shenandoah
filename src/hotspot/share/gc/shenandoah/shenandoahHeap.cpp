@@ -4166,8 +4166,8 @@ void ShenandoahHeap::add_to_throttle_budget(size_t budgeted_words) {
 
   if (notify_throttled) {
     wake_throttled();
-    notify_throttled_waiters();
   }
+  notify_throttled_waiters();
 }
 
 // Record the results of each throttled allocation request.
@@ -4218,13 +4218,6 @@ static bool is_power_of_two(size_t arg) {
   return false;
 }
 #endif
-
-void ShenandoahHeap::notify_throttled_waiters() {
-  if (_need_notify_waiters.try_unset()) {
-    MonitorLocker locker(_throttle_wait_monitor);
-    _throttle_wait_monitor->notify_all();
-  }
-}
 
 // Perform timed wait. Works like sleep(), except without modifying thread interruptible status.
 // MonitorLocker also checks for safepoints.                                                     

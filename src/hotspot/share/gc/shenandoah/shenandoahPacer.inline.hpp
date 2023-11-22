@@ -102,6 +102,7 @@ inline void ShenandoahThrottler::report_internal(size_t words_of_completed_work)
   // If we moved across a budget threshold, augment the budget.
   if (supplement > 0) {
     STATIC_ASSERT(sizeof(size_t) <= sizeof(intptr_t));
+    // add_to_throttle_budget will notify throttled waiters
     _heap->add_to_throttle_budget(supplement);
   }
 }

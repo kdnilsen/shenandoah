@@ -982,5 +982,12 @@ inline void ShenandoahHeap::mark_card_as_dirty(void* location) {
     _card_scan->mark_card_as_dirty((HeapWord*)location);
   }
 }
+inline void ShenandoahHeap::notify_throttled_waiters() {
+  if (_need_notify_waiters.try_unset()) {
+    MonitorLocker locker(_throttle_wait_monitor);
+    _throttle_wait_monitor->notify_all();
+  }
+}
+
 
 #endif // SHARE_GC_SHENANDOAH_SHENANDOAHHEAP_INLINE_HPP

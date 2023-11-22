@@ -381,6 +381,11 @@ void ShenandoahControlThread::run_service() {
         // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
         // not trigger the next GC because it prevents allocation pool from being depleted.
         heap->throttler()->setup_for_idle(allocation_runway);
+        shenandoah_assert_not_heaplocked();
+        if (ShenandoahThrottleAllocations) {
+          // New allocation budget granted with setup_for_idle, so ...
+          heap->notify_throttled_waiters();
+        }
       }
     } else {
       // Allow allocators to know we have seen this much regions
@@ -758,6 +763,11 @@ void ShenandoahControlThread::service_concurrent_cycle(ShenandoahHeap* heap,
     // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
     // not trigger the next GC because it prevents allocation pool from being depleted.
     heap->throttler()->setup_for_idle(allocation_runway);
+    shenandoah_assert_not_heaplocked();
+    if (ShenandoahThrottleAllocations) {
+      // New allocation budget granted with setup_for_idle, so ...
+      heap->notify_throttled_waiters();
+    }
   }
 }
 

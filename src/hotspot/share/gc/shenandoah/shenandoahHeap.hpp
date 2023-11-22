@@ -1033,8 +1033,6 @@ private:
     _need_notify_waiters.try_set();
   }
 
-  void notify_throttled_waiters();
-
   // A request is greedy if it consumes more than half of what remains in the throttle_budget
   inline bool request_is_greedy(intptr_t words) {
     return (words * 2 > _words_to_not_throttle);
@@ -1046,8 +1044,9 @@ private:
 
 public:
 
-  void absorb_throttle_metrics_and_increment_epoch(size_t progress);
+  inline void notify_throttled_waiters();
 
+  void absorb_throttle_metrics_and_increment_epoch(size_t progress);
 
   void start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id,
                                    size_t initial_budget, size_t phase_budget, size_t planned_work);

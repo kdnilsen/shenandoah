@@ -117,6 +117,12 @@ bool ShenandoahConcurrentGC::collect(GCCause::Cause cause) {
   {
     ShenandoahBreakpointMarkScope breakpoint_mark_scope(cause);
 
+    shenandoah_assert_not_heaplocked();
+    if (ShenandoahThrottleAllocations) {
+      // Back from init_mark, so ...
+      heap->notify_throttled_waiters();
+    }
+
     // Reset task queue stats here, rather than in mark_concurrent_roots,
     // because remembered set scan will `push` oops into the queues and
     // resetting after this happens will lose those counts.
@@ -153,6 +159,12 @@ bool ShenandoahConcurrentGC::collect(GCCause::Cause cause) {
   if (_generation->is_concurrent_mark_in_progress() && check_cancellation_and_abort(ShenandoahDegenPoint::_degenerated_mark)) {
     assert(!heap->is_concurrent_weak_root_in_progress(), "Weak roots should not be in progress when concurrent mark is in progress");
     return false;
+  }
+
+  shenandoah_assert_not_heaplocked();
+  if (ShenandoahThrottleAllocations) {
+    // back from final_mark so ...
+    heap->notify_throttled_waiters();
   }
 
   // Concurrent stack processing
@@ -206,6 +218,13 @@ bool ShenandoahConcurrentGC::collect(GCCause::Cause cause) {
   if (heap->has_forwarded_objects()) {
     // Perform update-refs phase.
     vmop_entry_init_updaterefs();
+
+    shenandoah_assert_not_heaplocked();
+    if (ShenandoahThrottleAllocations) {
+      // Back from init_updaterefs, so ...
+      heap->notify_throttled_waiters();
+    }
+
     entry_updaterefs();
     if (check_cancellation_and_abort(ShenandoahDegenPoint::_degenerated_updaterefs)) {
       return false;
@@ -601,6 +620,7 @@ void ShenandoahConcurrentGC::entry_cleanup_complete() {
 }
 
 void ShenandoahConcurrentGC::op_reset() {
+  shenandoah_assert_not_heaplocked();
   ShenandoahHeap* const heap = ShenandoahHeap::heap();
   if (ShenandoahPacing) {
     heap->pacer()->setup_for_reset();
@@ -609,6 +629,8 @@ void ShenandoahConcurrentGC::op_reset() {
     size_t allocation_runway =
       ((ShenandoahAdaptiveHeuristics *) (heap->young_generation()->heuristics()))->allocatable() >> LogHeapWordSize;
     heap->throttler()->setup_for_reset(allocation_runway);
+    // New allocation budget granted by setup for reset, so ...
+    heap->notify_throttled_waiters();
   }
   _generation->prepare_gc();
 }
