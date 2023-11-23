@@ -1465,13 +1465,11 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
   // for any waste created by retiring regions with this request.
   increase_used(req);
 
-#ifdef ASSERT
   size_t requested = req.size();
   size_t actual = req.actual_size();
   assert ((result == nullptr) || req.is_lab_alloc() || (requested == actual),
           "Only LAB allocations are elastic: %s, requested = " SIZE_FORMAT ", actual = " SIZE_FORMAT,
           ShenandoahAllocRequest::alloc_type_to_string(req.type()), requested, actual);
-#endif
 
   if (req.is_mutator_alloc()) {
     // If we requested more than we were granted, including if we were granted nothing, give the rest back to pacer.
