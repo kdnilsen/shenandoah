@@ -96,9 +96,7 @@ ShenandoahAdaptiveHeuristics::ShenandoahAdaptiveHeuristics(ShenandoahSpaceInfo* 
   _spike_acceleration_rate_samples(NEW_C_HEAP_ARRAY(double, ShenandoahRateAccelerationSampleSize, mtGC)),
   _spike_acceleration_rate_timestamps(NEW_C_HEAP_ARRAY(double, ShenandoahRateAccelerationSampleSize, mtGC)),
   _most_recent_headroom_at_start_of_idle(0),
-  _acceleration_goodness_ratio(ShenandoahInitialAcceleratedAllocationRateGoodnessRatio),
-  _consecutive_goodness(0),
-  _consecutive_goodness_sample_size(8) { }
+  _acceleration_goodness_ratio(ShenandoahInitialAcceleratedAllocationRateGoodnessRatio) { }
 
 ShenandoahAdaptiveHeuristics::~ShenandoahAdaptiveHeuristics() {
   FREE_C_HEAP_ARRAY(double, _spike_acceleration_rate_samples);
@@ -438,31 +436,22 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
     } else {
       _acceleration_goodness_ratio *= 1.12;     // increase sensitivity by 12%
     }
-    _consecutive_goodness = 0;
-    _consecutive_goodness_sample_size = 8;      // decrease sensitiivty (again) after 16 more good cycles
   } else {
     // step <= 0: all is well.
     //
-    // TODO: Implement this intent:
-    //
-    // Freeze at a given goodness factor if all looks good.  A value looks good if we consistently end
-    // end GC with AllocationSpikeThreshold +- 50% available.
-    //
-    // If we consistently end with more than this amount available, we are budgeting too aggressively and should
-    // reduce the sensitivity of GC trigger in order to trigger less frequently.
-    //
-    // If we consistently end with less than this amount available, we need to increase sensitivity of trigger so
-    // we can trigger more frequently.
+    // TODO: Implement the following intent:
+    //       1. Freeze at a given goodness factor if all looks good.  A value looks good if we consistently end
+    //          end GC with AllocationSpikeThreshold +- 50% available.
+    //       2. If we consistently end with more than this amount available, we are budgeting too aggressively and should
+    //          reduce the sensitivity of GC trigger in order to trigger less frequently.
+    //       3. If we consistently end with less than this amount available, we need to increase sensitivity of trigger so
+    //          we can trigger more frequently.
 
-    if (++_consecutive_goodness >= _consecutive_goodness_sample_size) {
-      // We've seen many good cycles in a row.
-      _acceleration_goodness_ratio *= 0.96;       // decrease sensitivity by 4%
-      _consecutive_goodness = 0;
-      // Wait no longer that 32 cycles before decreasing sensitivity another time
-      if (_consecutive_goodness_sample_size <= 16) {
-        _consecutive_goodness_sample_size *= 2;   // wait twice as long before decreasing sensitivity again
-      }
-    }
+    // The current heuristic is less sophisticated than the ideal
+    // intent
+    _acceleration_goodness_ratio *= 0.995;        // decrease sensitivity by 0.5%
+
+    // Note: it takes about 70 cycles to decrease goodness from 13.5% to 10.0 %
   }
 
   if (_acceleration_goodness_ratio > 0.18) {

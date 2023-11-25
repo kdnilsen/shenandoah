@@ -216,8 +216,6 @@ protected:
   size_t _most_recent_headroom_at_start_of_idle;
 
   double _acceleration_goodness_ratio;
-  size_t _consecutive_goodness;
-  size_t _consecutive_goodness_sample_size;
 
   size_t min_free_threshold();
 };
