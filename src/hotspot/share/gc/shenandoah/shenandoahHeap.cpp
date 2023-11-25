@@ -521,6 +521,10 @@ jint ShenandoahHeap::initialize() {
     _log_max_time_throttled[p]   = 0.0;
     _log_total_time_throttled[p] = 0.0;
   
+#ifdef KELVIN_REPOR_GRANT_MEMORY
+    _log_total_time_delayed[p]   = 0.0;
+#endif
+
     _log_failed[p]               = 0;
     _log_words_failed[p]         = 0;
     _log_min_words_failed[p]     = SIZE_MAX;
@@ -691,6 +695,10 @@ ShenandoahHeap::ShenandoahHeap(ShenandoahCollectorPolicy* policy) :
   _liveness_cache(nullptr),
   _collection_set(nullptr),
   _card_scan(nullptr),
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  _time_at_last_grant(0.0),
+  _num_grant_memory_entries(0),
+#endif
   _throttle_wait_monitor(new Monitor(Mutex::safepoint-1, "ShenandoahWaitMonitor_lock", true)),
   _throttle_epoch(0),
   _allocation_requests_throttled(0),
@@ -1511,19 +1519,20 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
             }
             if (throttled_request._is_granted) {
               // throttled_request has already been removed from queue
-              double throttle_time = throttled_request._end_throttle_time - throttled_request._start_throttle_time;
-              intptr_t epoch_at_end_of_throttle = throttle_epoch();
-              add_to_throttle_metrics(true, words, throttle_time, epoch_at_end_of_throttle - throttled_request._epoch_at_start);
+              throttled_request._epoch_at_end = throttle_epoch();
+              add_to_throttle_metrics(true, &throttled_request);
               // fall through to execute allocation code
             } else if (throttled_request._is_politely_deferred) {
               // We've waited our obligatory delay.  We can now claim the requested memory if it is still available.
               // If it is not available, we'll continue to wait, but not politely.
               if (claim_throttled_for_alloc(words, false, true)) {
                 // no longer need to throttle, but we whould record the throttling we already experienced.
-                double throttle_time = throttled_request._end_throttle_time - throttled_request._start_throttle_time;
-                intptr_t epoch_at_end_of_throttle = throttle_epoch();
+                throttled_request._epoch_at_end = throttle_epoch();
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+                throttled_request._grant_memory_time = throttled_request._end_throttle_time;
+#endif
                 remove_throttled_request_from_queue(&throttled_request);
-                add_to_throttle_metrics(true, words, throttle_time, epoch_at_end_of_throttle - throttled_request._epoch_at_start);
+                add_to_throttle_metrics(true, &throttled_request);
                 // fall through to execute allocation code
               } else {
                 // We already know the current thread is not attaching via jni and is_active_java_thread.  I'll break
@@ -1532,17 +1541,34 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
                 break;  
               }
             } else {
-              // This thread was in throttle and was notified, but its request was not granted.
-              // While we have the lock, let's try to make our request even smaller.
-              if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
-                words /= 4;
-                if (words < req.min_size()) {
-                  words = req.min_size();
+              // This thread was in throttle and was notified, but its request has not been granted.
+              // While we have the lock, let's try to make our request even smaller.  There may be races under
+              // which memory becomes available after I failed to claim, but before I requested notification.
+              // So I'll try to claim the memory now.  Allow greed because we've already stalled and the remaining
+              // amount of allocatable words may have shrunk, making my request appear to be greedy even though
+              // it wasn't originally greedy.
+              if (claim_throttled_for_alloc(words, false, true)) {
+                // no longer need to throttle.
+                throttled_request._epoch_at_end = throttle_epoch();
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+                throttled_request._grant_memory_time = throttled_request._end_throttle_time;
+#endif
+                remove_throttled_request_from_queue(&throttled_request);
+                add_to_throttle_metrics(true, &throttled_request);
+                // fall through to execute allocation code
+              } else {
+                // We already know the current thread is not attaching via jni and is_active_java_thread.  I'll break
+                // out of inner loop so I can wait for memory to become available.
+                if (req.is_lab_alloc() && ShenandoahElasticTLAB) {
+                  words /= 4;
+                  if (words < req.min_size()) {
+                    words = req.min_size();
+                  }
+                  throttled_request._requested_words = words;
                 }
-                throttled_request._requested_words = words;
+                // break out of the loop so we can wait some more.
+                break;
               }
-              // break out of the loop so we can wait some more.
-              break;
             }
           } else if (claim_throttled_for_alloc(words, false)) {
             // Our request is granted without requring any throttle.
@@ -1728,11 +1754,21 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
         return result;
       } // This closes the block that holds the heap lock, releasing the lock.
     }   // This closes the inner nested infinite loop.  We break out of the inner-nested loop so we can throttle
-
+#undef KELVIN_THROTTLE_DELAY
+#ifdef KELVIN_THROTTLE_DELAY
+    double most_recent_timestamp;
+#endif
     // We only reach here if we desire to throttle an allocation request.
     if (throttled_request._start_throttle_time == UninitializedTime) {
       throttled_request._start_throttle_time = os::elapsedTime();
+#ifdef KELVIN_THROTTLE_DELAY
+      most_recent_timestamp = throttled_request._start_throttle_time;
+#endif
     }
+#ifdef KELVIN_THROTTLE_DELAY
+    size_t most_recent_throttle_pause = current_throttle_pause;
+    size_t randomized_pause =
+#endif
     wait_in_throttle(current_throttle_pause);
     current_throttle_pause *= 2;
     if (current_throttle_pause > MAX_THROTTLE_DELAY_MS) {
@@ -1743,17 +1779,24 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
     if (!throttled_request._is_granted && (throttle_epoch() - throttled_request._epoch_at_start > 6)) {
       throttled_request._force_claim = true;
     }
-    if (throttled_request._is_granted || throttled_request._force_claim || throttled_request._is_politely_deferred) {
-      // We may be about to perform the allocation.  If is_politely_deferred, we may not allocate on this pass,
-      // but just in case we do, we have the _end_throttle_time available.
-      throttled_request._end_throttle_time = os::elapsedTime();
+    // There is a possibility that we are not done throttling, so setting _end_throttle_time may not be
+    // necessary.  But the strong likelikhood is that we are done.  We fetch the time here, while we do not
+    // hold the heaplock.
+    throttled_request._end_throttle_time = os::elapsedTime();
 
-      // We don't use the information gathered by the folllowing commented out code, but it might be of value if we want
-      // to mimic the metrics provided by ShenandoahPacer:
-      //
-      // double throttle_time = throttled_allocation._end_throttle_time - throttled_allocation.start_throttle_time;
-      // ShenandoahThreadLocalData::add_paced_time(current_thread, throttle_time);
+#ifdef KELVIN_THROTTLE_DELAY
+    size_t slept_millis = (throttled_request._end_throttle_time - most_recent_timestamp) * 1000;
+    if (slept_millis > most_recent_throttle_pause) {
+      log_info(gc)(PTR_FORMAT ": slept " SIZE_FORMAT " ms intended " SIZE_FORMAT
+                   " (randomized: " SIZE_FORMAT "): GFD: %s%s%s for words: " SIZE_FORMAT,
+                   p2i(throttled_request._current_thread), slept_millis, most_recent_throttle_pause, randomized_pause,
+                   throttled_request._is_granted? "T": "F",
+                   throttled_request._force_claim? "T": "F",
+                   throttled_request._is_politely_deferred? "T": "F", throttled_request._requested_words);
     }
+    most_recent_timestamp = throttled_request._end_throttle_time;
+#endif
+
     // Following brace closes the body of outer-nested infinite while loop.  After pausing in throttle request,
     // control flows to of loop where we acquire the heap lock and endeavor to perform the requested allocation.
   }
@@ -3803,9 +3846,15 @@ intptr_t _throttle_budget = 0;
 
 
 void ShenandoahHeap::start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id,
-                                                 size_t initial_budget, size_t phase_budget, size_t planned_work) {
+                                             size_t initial_budget, size_t phase_budget, size_t planned_work) {
+#undef KELVIN_START_THROTTLE
+#ifdef KELVIN_START_THROTTLE
+  log_info(gc)("start_throttle for phase(%s): initial_budget: " SIZE_FORMAT ", phase_budget: " SIZE_FORMAT ", planned work: "
+               SIZE_FORMAT, ShenandoahThrottler::phase_name(id), initial_budget, phase_budget, planned_work);
+#endif
+
   bool notify_throttled = false;
-  // Grab the heap lock so we can reliably access state variables
+  // Grab the heap lock (in case we don't already hold it) so we can reliably access state variables
   {
     ShenandoahHeapLocker locker(lock());
 
@@ -3847,7 +3896,12 @@ void ShenandoahHeap::start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id
 }
 
 void ShenandoahHeap::absorb_throttle_metrics_and_increment_epoch(size_t progress) {
-
+#ifdef KELVIN_START_THROTTLE
+  log_info(gc)("absorb throttle metrics(%s), progress: " SIZE_FORMAT ", phase_budget: " SIZE_FORMAT ", authorized: " SIZE_FORMAT
+               ", allocated: " SIZE_FORMAT ", allocatable at end: " SIZE_FORMAT,
+               ShenandoahThrottler::phase_name(_phase_label), progress, _phase_budget, _authorized_to_not_throttle,
+               _authorized_to_not_throttle - _words_to_not_throttle, _words_to_not_throttle);
+#endif
   if (_phase_label != ShenandoahThrottler::_not_a_label) {
     // Grab the heap lock so we can reliably access state variables
     ShenandoahHeapLocker locker(lock());
@@ -3895,16 +3949,15 @@ void ShenandoahHeap::absorb_throttle_metrics_and_increment_epoch(size_t progress
       double orig_evac_update_factor = throttler()->get_evacuate_vs_update_factor();
       double new_update_factor = recalibrate_phase_efforts(orig_evac_update_factor);
       log_metrics_and_prep_for_next(orig_evac_update_factor);
-      throttler()->set_evacuate_vs_update_factor(new_update_factor);
     }
   }
   // else, this is the start of the very first phase, and there is no prior phase to be reported
 }
 
-// Every 16 cycles, check whether the proportions between phase budgets are appropriate
-static const int RECALIBRATE_PERIOD = 16;
+// Every 8 cycles, check whether the proportions between phase budgets are appropriate
+static const int RECALIBRATE_PERIOD = 8;
 
-#define KELVIN_RECALIBRATE
+#undef KELVIN_RECALIBRATE
 double ShenandoahHeap::recalibrate_phase_efforts(double evac_update_factor) {
   shenandoah_assert_heaplocked();
 
@@ -3961,12 +4014,12 @@ double ShenandoahHeap::recalibrate_phase_efforts(double evac_update_factor) {
 #endif
   if (++_recalibrate_count >= RECALIBRATE_PERIOD) {
     if (_words_stalled_sum[ShenandoahThrottler::_update] > _words_stalled_sum[ShenandoahThrottler::_evac]) {
-      if (_words_stalled_sum[ShenandoahThrottler::_evac] / (double) _words_stalled_sum[ShenandoahThrottler::_update] < 0.50) {
+      if (_words_stalled_sum[ShenandoahThrottler::_evac] / (double) _words_stalled_sum[ShenandoahThrottler::_update] < 0.75) {
         // _update needs a larger budget
         evac_update_factor *= 0.9;
       }
     } else if (_words_stalled_sum[ShenandoahThrottler::_update] < _words_stalled_sum[ShenandoahThrottler::_evac]) {
-      if (_words_stalled_sum[ShenandoahThrottler::_update] / (double) _words_stalled_sum[ShenandoahThrottler::_evac] < 0.50) {
+      if (_words_stalled_sum[ShenandoahThrottler::_update] / (double) _words_stalled_sum[ShenandoahThrottler::_evac] < 0.75) {
         // _evac needs a larger budget
         evac_update_factor *= 1.1;
       }
@@ -3974,42 +4027,30 @@ double ShenandoahHeap::recalibrate_phase_efforts(double evac_update_factor) {
       // else, we stalled the same in each (probably zero).  Use remaining allocatable to guide recalibration.
       if (_available_sum[ShenandoahThrottler::_update] > _available_sum[ShenandoahThrottler::_evac]) {
         if ((_available_sum[ShenandoahThrottler::_evac] >= 0) &&
-            ((_available_sum[ShenandoahThrottler::_evac] / (double) _available_sum[ShenandoahThrottler::_update]) < 0.50)) {
+            ((_available_sum[ShenandoahThrottler::_evac] / (double) _available_sum[ShenandoahThrottler::_update]) < 0.75)) {
           // _evac needs a larger budget
           evac_update_factor *= 1.1;
         } else if ((_available_sum[ShenandoahThrottler::_update] > 0) && (_available_sum[ShenandoahThrottler::_evac] < 0)) {
           // evac needs a larger budget
           evac_update_factor *= 1.1;
         }
-      } else {
-        // else, we stalled the same in each (probably zero).  Use remaining allocatable to guide recalibration.
-        if (_available_sum[ShenandoahThrottler::_update] > _available_sum[ShenandoahThrottler::_evac]) {
-          if ((_available_sum[ShenandoahThrottler::_evac] >= 0) &&
-              ((_available_sum[ShenandoahThrottler::_evac] / (double) _available_sum[ShenandoahThrottler::_update]) < 0.50)) {
-            // _evac needs a larger budget
-            evac_update_factor *= 1.1;
-          } else if ((_available_sum[ShenandoahThrottler::_update] > 0) && (_available_sum[ShenandoahThrottler::_evac] < 0)) {
-            // evac needs a larger budget
-            evac_update_factor *= 1.1;
-          }
-          // else, leave budgets as is:
-          //  1. _available_sum[update] <= 0: so both are negative
-          //  2. or, _available_sum[evac] >= 0: so both are positive (but ratio does not justify change)
-        } else if (_available_sum[ShenandoahThrottler::_update] < _available_sum[ShenandoahThrottler::_evac]) {
-          if ((_available_sum[ShenandoahThrottler::_update] >= 0) &&
-              ((_available_sum[ShenandoahThrottler::_update] / (double) _available_sum[ShenandoahThrottler::_evac]) < 0.50)) {
-            // _update needs a larger budget
-            evac_update_factor *= 0.9;
-          } else if ((_available_sum[ShenandoahThrottler::_evac] > 0) && (_available_sum[ShenandoahThrottler::_update] < 0)) {
-            // _update needs a larger budget
-            evac_update_factor *= 0.9;
-          }
-          // else, leave budgets as is:
-          //  1. _available_sum[evac <= 0: so both are negative
-          //  2. or, _available_sum[update] >= 0: so both are positive (but ratio does not justify change)
+        // else, leave budgets as is:
+        //  1. _available_sum[update] <= 0: so both are negative
+        //  2. or, _available_sum[evac] >= 0: so both are positive (but ratio does not justify change)
+      } else if (_available_sum[ShenandoahThrottler::_update] < _available_sum[ShenandoahThrottler::_evac]) {
+        if ((_available_sum[ShenandoahThrottler::_update] >= 0) &&
+            ((_available_sum[ShenandoahThrottler::_update] / (double) _available_sum[ShenandoahThrottler::_evac]) < 0.75)) {
+          // _update needs a larger budget
+          evac_update_factor *= 0.9;
+        } else if ((_available_sum[ShenandoahThrottler::_evac] > 0) && (_available_sum[ShenandoahThrottler::_update] < 0)) {
+          // _update needs a larger budget
+          evac_update_factor *= 0.9;
         }
-        // else, let the status quo remain.
+        // else, leave budgets as is:
+        //  1. _available_sum[evac] <= 0: so both are negative
+        //  2. or, _available_sum[update] >= 0: so both are positive (but ratio does not justify change)
       }
+      // else, let the status quo remain.
 #ifdef KELVIN_RECALIBRATE
       log_info(gc)("evac_update_factor before recalibration: %4.3f", evac_update_factor);
 #endif
@@ -4022,6 +4063,7 @@ double ShenandoahHeap::recalibrate_phase_efforts(double evac_update_factor) {
 #ifdef KELVIN_RECALIBRATE
       log_info(gc)("after initialize recalibration data");
 #endif
+      throttler()->set_evacuate_vs_update_factor(evac_update_factor);
     }
   }
   return evac_update_factor;
@@ -4079,17 +4121,32 @@ void ShenandoahHeap::remove_throttled_request_from_queue(ShenandoahThrottledAllo
 intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_words) {
   shenandoah_assert_heaplocked();
 
-  ShenandoahThrottledAllocRequest *request, *predecessor, *candidate;
+  ShenandoahThrottledAllocRequest *predecessor, *candidate;
 
-  log_info(gc)("granting memory: " SIZE_FORMAT, available_words);
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  double now = os::elapsedTime();
+  double earliest_pending = now;
+  size_t potential_grant = available_words;
+  size_t reqs_not_granted = 0;
+  size_t reqs_granted = 0;
+  size_t words_not_granted = 0;
+  size_t words_granted = 0;
+#endif
 
   // Grant memory to as many leading entries on the queue as budget allows
   while ((available_words > (intptr_t) _throttle_queue_min_words) && 
          (_throttle_queue_head != nullptr) && ((intptr_t) _throttle_queue_head->_requested_words <= available_words)) {
     size_t requested_words = _throttle_queue_head->_requested_words;
     available_words -= requested_words;
-    request = _throttle_queue_head;
-    _throttle_queue_head = request->_next;
+    candidate = _throttle_queue_head;
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+    reqs_granted++;
+    words_granted += requested_words;
+    if (candidate->_start_throttle_time < earliest_pending) {
+      earliest_pending = candidate->_start_throttle_time;
+    }
+#endif
+    _throttle_queue_head = candidate->_next;
     if (_throttle_queue_head == nullptr) {
       _throttle_queue_tail = nullptr;
       _throttle_queue_min_words = 0;
@@ -4099,9 +4156,9 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
       assert(_throttle_queue_length >= 1, "Cannot remove entry from throttle queue unless length >= 1");
       _throttle_queue_length--;
     }
-    request->_is_granted = true;
-    request->_next = nullptr;
-    request->_prev = nullptr;
+    candidate->_is_granted = true;
+    candidate->_next = nullptr;
+    candidate->_prev = nullptr;
   }
 
   candidate = _throttle_queue_head;
@@ -4110,6 +4167,13 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
     // See if there are any other pending requests on the queue that can be satisfied even if the leading entries on the
     // queue may need more memory than what remains of available_words
     while ((candidate != nullptr) && ((intptr_t) candidate->_requested_words > available_words)) {
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+      if (candidate->_start_throttle_time < earliest_pending) {
+        earliest_pending = candidate->_start_throttle_time;
+      }
+      reqs_not_granted++;
+      words_not_granted += candidate->_requested_words;
+#endif
       minimum_request_seen = MIN2(candidate->_requested_words, minimum_request_seen);
       predecessor = candidate;
       candidate = candidate->_next;
@@ -4117,8 +4181,14 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
     while ((available_words > (intptr_t) _throttle_queue_min_words) &&
            (candidate != nullptr) && ((intptr_t) candidate->_requested_words <= available_words)) {
       size_t requested_words = candidate->_requested_words;
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+      reqs_granted++;
+      words_granted += requested_words;
+      if (candidate->_start_throttle_time < earliest_pending) {
+        earliest_pending = candidate->_start_throttle_time;
+      }
+#endif
       available_words -= requested_words;
-
       predecessor->_next = candidate->_next;
       if (predecessor->_next == nullptr) {
         _throttle_queue_tail = predecessor;
@@ -4140,13 +4210,31 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
     _throttle_queue_min_words = minimum_request_seen;
   }
 
-  log_info(gc)("After granting memory: " SIZE_FORMAT, available_words);
-
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  if ((reqs_granted > 0) || (reqs_not_granted > 0)) {
+    _grant_memory_log[_num_grant_memory_entries].time_since_last = now - _time_at_last_grant;
+    _grant_memory_log[_num_grant_memory_entries].earliest_pending = earliest_pending;
+    _grant_memory_log[_num_grant_memory_entries].time_of = now;
+    _grant_memory_log[_num_grant_memory_entries].potential_grant = potential_grant;
+    _grant_memory_log[_num_grant_memory_entries].reqs_granted = reqs_granted;
+    _grant_memory_log[_num_grant_memory_entries].reqs_not_granted = reqs_not_granted;
+    _grant_memory_log[_num_grant_memory_entries].words_granted = words_granted;
+    _grant_memory_log[_num_grant_memory_entries].words_not_granted = words_not_granted;
+    _num_grant_memory_entries++;
+    if (_num_grant_memory_entries >= MAX_GRANTS) {
+      log_info(gc)("overflow of grant memory log!");
+      _num_grant_memory_entries--;
+    }
+  }
+  _time_at_last_grant = now;
+#endif
   return available_words;
 }
 
 void ShenandoahHeap::add_to_throttle_budget(size_t budgeted_words) {
   bool notify_throttled = false;
+  shenandoah_assert_not_heaplocked();
+
   {
     ShenandoahHeapLocker locker(lock());
 
@@ -4172,7 +4260,14 @@ void ShenandoahHeap::add_to_throttle_budget(size_t budgeted_words) {
 }
 
 // Record the results of each throttled allocation request.
-void ShenandoahHeap::add_to_throttle_metrics(bool successful, size_t words, double delay, size_t phase_delta) {
+void ShenandoahHeap::add_to_throttle_metrics(bool successful, ShenandoahThrottledAllocRequest* req) {
+
+  size_t words = req->_requested_words;
+  double delay = req->_end_throttle_time - req->_start_throttle_time;
+  size_t phase_delta = req->_epoch_at_end - req->_epoch_at_start;
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  double delay_from_grant = req->_end_throttle_time - req->_grant_memory_time;
+#endif
   shenandoah_assert_heaplocked();
   size_t old_val, new_val;
   double old_dv, new_dv;
@@ -4188,6 +4283,9 @@ void ShenandoahHeap::add_to_throttle_metrics(bool successful, size_t words, doub
     _min_words_throttled = MIN2(_min_words_throttled, words);
     _max_time_throttled= MAX2(_max_time_throttled, delay);
     _total_time_throttled += delay;
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+    _total_time_delayed += delay_from_grant;
+#endif
   } else {
     _allocation_requests_failed++;
     _total_words_failed += words;
@@ -4195,6 +4293,9 @@ void ShenandoahHeap::add_to_throttle_metrics(bool successful, size_t words, doub
     _min_words_failed = MIN2(_min_words_failed, words);
     _max_time_failed = MAX2(_max_time_failed, delay);
     _total_time_failed += delay;
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+    _total_time_delayed += delay_from_grant;
+#endif
   }
 }
 
@@ -4222,7 +4323,7 @@ static bool is_power_of_two(size_t arg) {
 
 // Perform timed wait. Works like sleep(), except without modifying thread interruptible status.
 // MonitorLocker also checks for safepoints.                                                     
-void ShenandoahHeap::wait_in_throttle(size_t time_ms) {
+size_t ShenandoahHeap::wait_in_throttle(size_t time_ms) {
   assert(time_ms > 0, "Should not call this with zero argument, as it would stall until notify");
   assert(time_ms <= LONG_MAX, "Sanity");
   assert(is_power_of_two(time_ms), "efficiency hack");
@@ -4233,6 +4334,7 @@ void ShenandoahHeap::wait_in_throttle(size_t time_ms) {
   // need to refresh their TLABs and all threads already in a throttling state get notified.
   long scattered_ms = (rand() & (time_ms - 1)) + 1;
   _throttle_wait_monitor->wait(scattered_ms);
+  return scattered_ms;
 }
 
 #define FORMAT_WORDS(x)  byte_size_in_proper_unit(((x) == (SIZE_MAX))? 0: (x) << LogHeapWordSize), \
@@ -4260,6 +4362,12 @@ void ShenandoahHeap::log_metrics_and_prep_for_next(double evac_update_factor) {
                        FORMAT_WORDS(_log_max_words_failed[p]),
                        _log_max_time_failed[p], _log_total_time_failed[p], _log_carryovers[p]);
 
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+    if (_log_total_time_delayed[p] > 0.0) {
+      log_info(gc, ergo)("  delayed after grant: %.6f", _log_total_time_delayed[p]);
+    }
+#endif
+
     _log_effort[p]       = 0;
     _log_progress[p]     = 0;
     _log_budget[p]       = 0;
@@ -4282,7 +4390,28 @@ void ShenandoahHeap::log_metrics_and_prep_for_next(double evac_update_factor) {
 
     _log_allocatable_at_end[p]   = 0;
     _log_carryovers[p]           = 0;
+
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+    _log_total_time_delayed[p]   = 0.0;
+#endif
   }
+
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  if (_num_grant_memory_entries > 0) {
+    log_info(gc)("%12s %12s %12s %12s %12s %12s %12s %12s %12s",
+                 "GrantLog", "GrantTime", "SincePrev", "OldestStart", "PotentGrant", "ReqsGranted", "WordsGranted", "ReqsRejected",
+                 "WordsRejected");
+    for (size_t i = 0; i < _num_grant_memory_entries; i++) {
+      struct grant_log* entry = &_grant_memory_log[i];
+      log_info(gc)(SIZE_FORMAT_W(12) " %12.6f %12.6f %12.6f " SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12) " "
+                   SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12),
+                   i, entry->time_of, entry->time_since_last, entry->time_of - entry->earliest_pending,
+                   entry->potential_grant, entry->reqs_granted, entry->words_granted,
+                   entry->reqs_not_granted, entry->words_not_granted);
+    }
+    _num_grant_memory_entries = 0;
+  }
+#endif
 }
 
 // Don't allow any allocation to make the budget negative, unless force.

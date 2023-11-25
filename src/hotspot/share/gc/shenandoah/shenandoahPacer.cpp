@@ -419,6 +419,15 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
       // above TAMS.
       projected_work = young_used;
     } else {
+      // During certain workload spikes, the amount of marking effort has been observed to increase by over 7 fold
+      // from one GC to the next.  If we always assume this worst case, we'll throttle too aggressively for the common
+      // case.  But if we totally ignore this scenario, we'll exhaust our throttle budget well before we've finished
+      // marking, and will end up with a long droubt of memory, with many stalled threads requiring many seconds of
+      // pause time.  Conservatively budgeting for 2-fold increase in marking effort represents a compromise between
+      // extremes.
+      //
+      // TODO: we can monitor for any given workload the maximum increase in marking effort between consecutive GCs
+      // and adapt this number as appropriate.
       projected_work = MIN2(_most_recent_live_young_words * 2, young_used);
     }
   }
@@ -429,10 +438,11 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
   // replenished.
 
 
-  // Allow ourselves to allocate 3/4 of remaining available during concurrent mark, recognizing that concurrent
+  // Allow ourselves to allocate 2/3 of remaining available during concurrent mark, recognizing that concurrent
   // marking is typically the most time consuming phase of GC (e.g. 70%).  Recognize that any immediate trash
   // reclaimed at the end of concurrent marking will allow us to expand the budget when we begin concurrent evacuation.
-  // In other words, allowing 75% of available to be allocated during concurrent marking is probably conservative.
+  // In other words, even though we "allow" 75% of available to be allocated during concurrent marking, this will
+  // rarely happen.
 
   size_t phase_budget = 3 * words_allocatable / 4;
 
@@ -446,12 +456,12 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
   _work_completed[_fifth_microphase]  = (size_t) (0.625 * projected_work);   // 1/8 more
 
   // Initial allocation budget is 0.25 * phase_budget
-  intptr_t initial_budget = phase_budget / 2;
-  _budget_supplement[_first_microphase]  = (size_t) (0.2500 * phase_budget);   // Cumulative budget = 0.7500 * phase_budget
-  _budget_supplement[_second_microphase] = (size_t) (0.0625 * phase_budget);   // Cumulative budget = 0.8125 * phase_budget
-  _budget_supplement[_third_microphase]  = (size_t) (0.0625 * phase_budget);   // Cumulative budget = 0.8750 * phase_budget
-  _budget_supplement[_fourth_microphase] = (size_t) (0.0625 * phase_budget);   // Cumulative budget = 0.9375 * phase_budget
-  _budget_supplement[_fifth_microphase]  = (size_t) (0.0625 * phase_budget);   // Cumulative budget = 1.0000 * phase_budget
+  intptr_t initial_budget = phase_budget / 4;
+  _budget_supplement[_first_microphase]  = (size_t) (0.250 * phase_budget);   // Cumulative budget = 0.500 * phase_budget
+  _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);   // Cumulative budget = 0.625 * phase_budget
+  _budget_supplement[_third_microphase]  = (size_t) (0.125 * phase_budget);   // Cumulative budget = 0.750 * phase_budget
+  _budget_supplement[_fourth_microphase] = (size_t) (0.125 * phase_budget);   // Cumulative budget = 0.875 * phase_budget
+  _budget_supplement[_fifth_microphase]  = (size_t) (0.125 * phase_budget);   // Cumulative budget = 1.000 * phase_budget
 
   Atomic::store(&_progress, (size_t) 0L);
   ShenandoahHeap::heap()->start_throttle_for_gc_phase(_mark, initial_budget, phase_budget, projected_work);
@@ -521,13 +531,13 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
   _work_completed[_fourth_microphase] = (size_t) (0.6250 * projected_work);  //  1/8 more
   _work_completed[_fifth_microphase]  = (size_t) (0.7500 * projected_work);  //  1/8 more
 
-  // Initial allocation budget is 0.5 * phase_budget
-  size_t initial_budget = phase_budget / 2;
-  _budget_supplement[_first_microphase]  = (size_t) (0.2500 * phase_budget);  // Cumulative budget:   3/4 phase_budget
-  _budget_supplement[_second_microphase] = (size_t) (0.0625 * phase_budget);  // Cumulative budget: 13/16 phase_budget
-  _budget_supplement[_third_microphase]  = (size_t) (0.0625 * phase_budget);  // Cumulative budget:   7/8  phase_budget
-  _budget_supplement[_fourth_microphase] = (size_t) (0.0625 * phase_budget);  // Cumulative budget: 15/16 phase_budget
-  _budget_supplement[_fifth_microphase]  = (size_t) (0.0625 * phase_budget);  // Cumulative budget:  full phase_budget
+  // Initial allocation budget is 0.25 * phase_budget
+  size_t initial_budget = phase_budget / 4;
+  _budget_supplement[_first_microphase]  = (size_t) (0.250 * phase_budget);  // Cumulative budget:  1/2 phase_budget
+  _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  5/8 phase_budget
+  _budget_supplement[_third_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget:  3/4 phase_budget
+  _budget_supplement[_fourth_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  7/8 phase_budget
+  _budget_supplement[_fifth_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget: full phase_budget
 
   Atomic::store(&_progress, (size_t) 0L);
   ShenandoahHeap::heap()->start_throttle_for_gc_phase(_evac, initial_budget, phase_budget, projected_work);
@@ -567,13 +577,13 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
   _work_completed[_fourth_microphase] = (size_t) (0.625 * projected_work);  // 1/8 more
   _work_completed[_fifth_microphase]  = (size_t) (0.750 * projected_work);  // 1/8 more
 
-  // Initial allocation budget is 0.5 * phase_budget
-  size_t initial_budget = phase_budget / 2;
-  _budget_supplement[_first_microphase]  = (size_t) (0.2500 * phase_budget);  // Cumulative budget:   3/4 phase_budget
-  _budget_supplement[_second_microphase] = (size_t) (0.0625 * phase_budget);  // Cumulative budget: 13/16 phase_budget
-  _budget_supplement[_third_microphase]  = (size_t) (0.0625 * phase_budget);  // Cumulative budget:   7/8  phase_budget
-  _budget_supplement[_fourth_microphase] = (size_t) (0.0625 * phase_budget);  // Cumulative budget: 15/16 phase_budget
-  _budget_supplement[_fifth_microphase]  = (size_t) (0.0625 * phase_budget);  // Cumulative budget:  full phase_budget
+  // Initial allocation budget is 0.25 * phase_budget
+  size_t initial_budget = phase_budget / 4;
+  _budget_supplement[_first_microphase]  = (size_t) (0.250 * phase_budget);  // Cumulative budget:  1/2 phase_budget
+  _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  5/8 phase_budget
+  _budget_supplement[_third_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget:  3/4 phase_budget
+  _budget_supplement[_fourth_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  7/8 phase_budget
+  _budget_supplement[_fifth_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget: full phase_budget
 
   Atomic::store(&_progress, (size_t) 0L);
   ShenandoahHeap::heap()->start_throttle_for_gc_phase(_update, initial_budget, phase_budget, projected_work);
@@ -607,7 +617,7 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
 
   // We don't want throttles during Idle, so we double available
   Atomic::store(&_progress, (size_t) 0L);
-  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_mark, allocatable_words * 2, allocatable_words * 2, 0);
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_idle, allocatable_words * 2, allocatable_words * 2, 0);
 }
 
 /*
@@ -635,5 +645,5 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   _budget_supplement[_fifth_microphase]  = (size_t) 0;
 
   Atomic::store(&_progress, (size_t) 0L);
-  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_mark, allocatable_words, allocatable_words, 0);
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_reset, allocatable_words, allocatable_words, 0);
 }

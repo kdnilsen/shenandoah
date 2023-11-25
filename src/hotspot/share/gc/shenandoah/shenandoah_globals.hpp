@@ -60,7 +60,7 @@
           "recognize acceleration trends, and less likely to trigger "      \
           "collection dues to acceleration.  A larger value may result "    \
           "excessive triggers.")                                            \
-          range(0,1.0)                                                      \
+          range(0.06,0.18)                                                  \
                                                                             \
   product(uintx, ShenandoahMomentaryAllocationRateSpikeSampleSize,          \
           3, EXPERIMENTAL,                                                  \

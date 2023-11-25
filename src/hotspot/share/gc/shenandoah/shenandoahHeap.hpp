@@ -93,13 +93,20 @@ class VMStructs;
 typedef uint16_t ShenandoahLiveData;
 #define SHENANDOAH_LIVEDATA_MAX ((ShenandoahLiveData)-1)
 
+#undef KELVIN_REPORT_GRANT_MEMORY
+
+
 struct shenandoah_throttled_alloc_req {
   struct shenandoah_throttled_alloc_req *_prev;  // Previous throttled requests on the queue
   struct shenandoah_throttled_alloc_req *_next;  // Next throttled requests on the queue
   JavaThread* _current_thread;                   // What is my thread id?
   double _start_throttle_time;                   // When did throttle request begin?
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  double _grant_memory_time;
+#endif
   double _end_throttle_time;                     // When was throttle request granted?
   intptr_t _epoch_at_start;
+  intptr_t _epoch_at_end;
   size_t _requested_words;                       // How many words are requested?
   bool _is_granted;                              // True when release can be granted
   bool _force_claim;                             // True if we need to force a claim that was not granted after too long of a delay
@@ -914,6 +921,22 @@ private:
 // ---------- ShenandoahHeap implementation of throttling
 // 
 
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+#define MAX_GRANTS 256
+  double _time_at_last_grant;
+  size_t _num_grant_memory_entries;
+  struct grant_log {
+    double time_since_last;
+    double earliest_pending;
+    double time_of;
+    size_t potential_grant;
+    size_t reqs_granted;
+    size_t words_granted;
+    size_t reqs_not_granted;
+    size_t words_not_granted;
+  } _grant_memory_log[MAX_GRANTS];
+#endif
+
   Monitor* _throttle_wait_monitor;
   ShenandoahSharedFlag _need_notify_waiters;
 
@@ -934,6 +957,9 @@ private:
   double _max_time_failed;
   double _total_time_failed;
 
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  double _total_time_delayed;
+#endif
   size_t _phase_carryovers;
 
   // Metrics gathered for logging
@@ -959,6 +985,11 @@ private:
 
   intptr_t _log_allocatable_at_end[ShenandoahThrottler::_GCPhase_Count];
   size_t _log_carryovers[ShenandoahThrottler::_GCPhase_Count];
+
+#ifdef KELVIN_REPORT_GRANT_MEMORY
+  double _log_total_time_delayed[ShenandoahThrottler::_GCPhase_Count];
+#endif
+
 
   // Metrics gathered for recalibration
   intptr_t _available_sum[ShenandoahThrottler::_GCPhase_Count];
@@ -1010,8 +1041,7 @@ private:
     _words_to_not_throttle = words;
   }
 
-  void add_to_throttle_metrics(bool successful, size_t words, double delay, size_t phase_delta);
-
+  void add_to_throttle_metrics(bool successful, ShenandoahThrottledAllocRequest* req);
 
   void add_throttle_request_to_queue(ShenandoahThrottledAllocRequest* new_request);
 
@@ -1027,7 +1057,8 @@ private:
     return _throttle_queue_length;
   }
 
-  void wait_in_throttle(size_t time_ms);
+  // Returns number of ms planning to wait, which is randomized value between 1 and time_ms, inclusive
+  size_t wait_in_throttle(size_t time_ms);
 
   inline void wake_throttled() {
     _need_notify_waiters.try_set();
