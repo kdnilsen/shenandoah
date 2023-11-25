@@ -998,6 +998,8 @@ private:
 
   size_t _recalibrate_count;
 
+  ShenandoahThrottledAllocRequest* _throttle_queue_head;
+  ShenandoahThrottledAllocRequest* _throttle_queue_tail;
   size_t _throttle_queue_length;
   size_t _throttle_queue_min_words; // all throttled requests on the queue request no fewer words than this
 
@@ -1045,7 +1047,7 @@ private:
 
   void add_throttle_request_to_queue(ShenandoahThrottledAllocRequest* new_request);
 
-  intptr_t grant_memory_to_throttled_requests(intptr_t available_words);
+  intptr_t grant_memory_to_throttled_requests(intptr_t available_words, bool force_queue_to_be_empty);
 
   void remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request);
 
