@@ -4440,6 +4440,10 @@ void ShenandoahHeap::log_metrics_and_prep_for_next(double evac_update_factor) {
 bool ShenandoahHeap::claim_throttled_for_alloc(intptr_t words, bool force, bool allow_greed) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
   shenandoah_assert_heaplocked();
+  
+  if (force) {
+    allow_greed = true;
+  }
 
   // We do not allow thread to allocate more than half of remaining available words unless allow_greed
   intptr_t new_budget = _words_to_not_throttle - words;
