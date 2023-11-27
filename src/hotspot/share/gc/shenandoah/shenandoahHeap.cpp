@@ -1756,7 +1756,7 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
         return result;
       } // This closes the block that holds the heap lock, releasing the lock.
     }   // This closes the inner nested infinite loop.  We break out of the inner-nested loop so we can throttle
-#undef KELVIN_THROTTLE_DELAY
+#define KELVIN_THROTTLE_DELAY
 #ifdef KELVIN_THROTTLE_DELAY
     double most_recent_timestamp;
 #endif

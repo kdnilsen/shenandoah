@@ -93,7 +93,7 @@ class VMStructs;
 typedef uint16_t ShenandoahLiveData;
 #define SHENANDOAH_LIVEDATA_MAX ((ShenandoahLiveData)-1)
 
-#undef KELVIN_REPORT_GRANT_MEMORY
+#define KELVIN_REPORT_GRANT_MEMORY
 
 
 struct shenandoah_throttled_alloc_req {
