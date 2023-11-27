@@ -435,7 +435,7 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
     if (_gc_time_penalties + step > 25) {
       _acceleration_goodness_ratio *= 0.92;     // decrease sensitivity by 8%
     } else {
-      _acceleration_goodness_ratio *= 1.10;     // increase sensitivity by 10%
+      _acceleration_goodness_ratio *= 1.12;     // increase sensitivity by 12%
     }
   } else {
     // step <= 0: all is well.
@@ -450,9 +450,7 @@ void ShenandoahAdaptiveHeuristics::adjust_penalty(intx step) {
 
     // The current heuristic is less sophisticated than the ideal
     // intent
-    _acceleration_goodness_ratio *= 0.99;        // decrease sensitivity by 1%%
-
-    // Note: it takes about 45 cycles to decrease goodness from 14.5% to 10.0 %
+    _acceleration_goodness_ratio *= 0.995;        // decrease sensitivity by 0.5%
   }
 
   if (_acceleration_goodness_ratio > 0.18) {

@@ -292,6 +292,8 @@ public:
   void setup_for_idle(size_t allocatable_words);
   void setup_for_reset(size_t allocatable_words);
 
+  void recover_from_degeneration(bool is_global);
+
   inline size_t scale_updaterefs_work(size_t work) {
     size_t scaled = (size_t) (work / _evacuate_vs_update_factor);
     return scaled;

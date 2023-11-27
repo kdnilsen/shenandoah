@@ -61,6 +61,9 @@ bool ShenandoahDegenGC::collect(GCCause::Cause cause) {
     heap->mmu_tracker()->record_degenerated(GCId::current(), is_bootstrap_gc);
     const char* msg = is_bootstrap_gc? "At end of Degenerated Bootstrap Old GC": "At end of Degenerated Young GC";
     heap->log_heap_status(msg);
+    if (ShenandoahThrottleAllocations) {
+      heap->throttler()->recover_from_degeneration(_generation->is_global());
+    }
   }
   return true;
 }
