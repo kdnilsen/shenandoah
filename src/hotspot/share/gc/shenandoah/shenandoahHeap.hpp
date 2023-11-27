@@ -929,7 +929,8 @@ private:
     double time_since_last;
     double earliest_pending;
     double time_of;
-    size_t potential_grant;
+    size_t originally_avail;
+    size_t newly_avail;
     size_t reqs_granted;
     size_t words_granted;
     size_t reqs_not_granted;
@@ -1047,7 +1048,8 @@ private:
 
   void add_throttle_request_to_queue(ShenandoahThrottledAllocRequest* new_request);
 
-  intptr_t grant_memory_to_throttled_requests(intptr_t available_words, bool force_queue_to_be_empty);
+  intptr_t grant_memory_to_throttled_requests(intptr_t originally_available, intptr_t newly_available,
+                                              bool force_queue_to_be_empty);
 
   void remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request);
 

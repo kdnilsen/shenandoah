@@ -241,6 +241,17 @@ public:
     _third_microphase,
     _fourth_microphase,
     _fifth_microphase,
+    _sixth_microphase,
+    _seventh_microphase,
+    _eighth_microphase,
+    _ninth_microphase,
+    _tenth_microphase,
+    _11th_microphase,
+    _12th_microphase,
+    _13th_microphase,
+    _14th_microphase,
+    _15th_microphase,
+    _16th_microphase,
     _Microphase_Count
   };
 

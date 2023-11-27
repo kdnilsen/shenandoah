@@ -409,7 +409,7 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
       // above TAMS.
       projected_work = global_used;
     } else {
-      projected_work = MIN2(_most_recent_live_global_words * 2, global_used);
+      projected_work = MIN2(_most_recent_live_global_words * 4, global_used);
     }
   } else {
     size_t young_used = ShenandoahHeap::heap()->young_generation()->used() >> LogHeapWordSize;
@@ -419,16 +419,33 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
       // above TAMS.
       projected_work = young_used;
     } else {
-      // During certain workload spikes, the amount of marking effort has been observed to increase by over 7 fold
+      // During certain workload spikes, the amount of marking effort has been observed to increase by over 6 fold
       // from one GC to the next.  If we always assume this worst case, we'll throttle too aggressively for the common
       // case.  But if we totally ignore this scenario, we'll exhaust our throttle budget well before we've finished
-      // marking, and will end up with a long droubt of memory, with many stalled threads requiring many seconds of
-      // pause time.  Conservatively budgeting for 2-fold increase in marking effort represents a compromise between
-      // extremes.
+      // marking, and will end up with a long drought of memory, with many stalled threads requiring many seconds of
+      // pause time.
+      //
+      // Our strategy is two fold:
+      // 1. We make nearly all (15/16) of memory available for the mark phase budget
+      // 2. We predict that mark effort will be 6x the preceding mark effort
+      // 3. We distribute the budget across the entire projected work, requring nearly all projected work to be completed
+      //    before the final traunche of avaiable memory is granted
+      // 4. Since the typical mark effort is much less than 6x previous mark effort, we normally will not allot the
+      //    entire phase budget, and will usually have much more than 1/16 of available memory to use between evac
+      //    and update refs.
+      // 5. We recognize that marking makes slower progress during its initial efforts than during its finishing efforts.
+      //    Progress is measured by the number of words scanned within previously marked objects.  Scanning is much more
+      //    work at the start of marking because, at the start, nearly every scanned reference points to an object that
+      //    has not yet been marked, so we have to do the work of marking the object.  Near the end of marking, most
+      //    references scanned refer to objects that have already been marked, so less effort is required of the scanner.
+      //    For this reason, we bias our efforts to count smaller amounts of progress at the start as equivalent to
+      //    larger amounts of progress at the end.  For this reason, we allow less measured progress at the start of
+      //    marking than at the end.  This is staggered because some marking efforts will finish after only 4 steps, some
+      //    after 5, some after 6, and so on.
       //
       // TODO: we can monitor for any given workload the maximum increase in marking effort between consecutive GCs
       // and adapt this number as appropriate.
-      projected_work = MIN2(_most_recent_live_young_words * 2, young_used);
+      projected_work = MIN2(_most_recent_live_young_words * 6, young_used);
     }
   }
 
@@ -437,31 +454,50 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
   // find themselves in "infinite" waiting loops until we complete this phase of GC, at which time budgets will be
   // replenished.
 
+  size_t phase_budget = 15 * words_allocatable / 16;
 
-  // Allow ourselves to allocate 2/3 of remaining available during concurrent mark, recognizing that concurrent
-  // marking is typically the most time consuming phase of GC (e.g. 70%).  Recognize that any immediate trash
-  // reclaimed at the end of concurrent marking will allow us to expand the budget when we begin concurrent evacuation.
-  // In other words, even though we "allow" 75% of available to be allocated during concurrent marking, this will
-  // rarely happen.
+  assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
-  size_t phase_budget = 3 * words_allocatable / 4;
+  // Note that we typically overbudget work for marking by a factor of 6 (usually, all work is completed at 17-50% of projected)
+  // We intentionally sum to 100%, because rare scenarios may require even more than projected_work to complete
+  _work_completed[_first_microphase]    = (size_t) (0.015625 * projected_work);   // add 1/64
+  _work_completed[_second_microphase]   = (size_t) (0.031250 * projected_work);   // add 1/64
+  _work_completed[_third_microphase]    = (size_t) (0.046875 * projected_work);   // add 1/64
+  _work_completed[_fourth_microphase]   = (size_t) (0.078125 * projected_work);   // add 1/32
+  _work_completed[_fifth_microphase]    = (size_t) (0.109375 * projected_work);   // add 1/32
+  _work_completed[_sixth_microphase]    = (size_t) (0.140625 * projected_work);   // add 1/32
+  _work_completed[_seventh_microphase]  = (size_t) (0.171875 * projected_work);   // add 1/32
+  _work_completed[_eighth_microphase]   = (size_t) (0.234375 * projected_work);   // add 1/16 
+  _work_completed[_ninth_microphase]    = (size_t) (0.296875 * projected_work);   // add 1/16
+  _work_completed[_tenth_microphase]    = (size_t) (0.390625 * projected_work);   // add 1/16 + 1/32
+  _work_completed[_11th_microphase]     = (size_t) (0.484375 * projected_work);   // add 1/16 + 1/32
+  _work_completed[_12th_microphase]     = (size_t) (0.578125 * projected_work);   // add 1/16 + 1/32
+  _work_completed[_13th_microphase]     = (size_t) (0.671875 * projected_work);   // add 1/16 + 1/32
+  _work_completed[_14th_microphase]     = (size_t) (0.781250 * projected_work);   // add 1/16 + 1/32 + 1/64
+  _work_completed[_15th_microphase]     = (size_t) (0.890625 * projected_work);   // add 1/16 + 1/32 + 1/64
+  _work_completed[_16th_microphase]     = (size_t) (1.000000 * projected_work);   // add 1/16 + 1/32 + 1/64
 
-  assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
-  // Note that we typically overbudget work for marking by a factor of 2 (so all work is completed at ~50% of projected)
-  _work_completed[_first_microphase]  = (size_t) (0.125 * projected_work);   // 1/8 of projected work
-  _work_completed[_second_microphase] = (size_t) (0.250 * projected_work);   // 1/8 more
-  _work_completed[_third_microphase]  = (size_t) (0.375 * projected_work);   // 1/8 more
-  _work_completed[_fourth_microphase] = (size_t) (0.500 * projected_work);   // 1/8 more
-  _work_completed[_fifth_microphase]  = (size_t) (0.625 * projected_work);   // 1/8 more
 
   // Initial allocation budget is 0.25 * phase_budget
   intptr_t initial_budget = phase_budget / 4;
-  _budget_supplement[_first_microphase]  = (size_t) (0.250 * phase_budget);   // Cumulative budget = 0.500 * phase_budget
-  _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);   // Cumulative budget = 0.625 * phase_budget
-  _budget_supplement[_third_microphase]  = (size_t) (0.125 * phase_budget);   // Cumulative budget = 0.750 * phase_budget
-  _budget_supplement[_fourth_microphase] = (size_t) (0.125 * phase_budget);   // Cumulative budget = 0.875 * phase_budget
-  _budget_supplement[_fifth_microphase]  = (size_t) (0.125 * phase_budget);   // Cumulative budget = 1.000 * phase_budget
+  _budget_supplement[_first_microphase]    = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.0938 * phase_budget
+  _budget_supplement[_second_microphase]   = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.1875 * phase_budget
+  _budget_supplement[_third_microphase]    = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.2813 * phase_budget
+  _budget_supplement[_fourth_microphase]   = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.3750 * phase_budget
+  _budget_supplement[_fifth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4063 * phase_budget
+  _budget_supplement[_sixth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4375 * phase_budget
+  _budget_supplement[_seventh_microphase]  = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4688 * phase_budget
+  _budget_supplement[_eighth_microphase]   = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5000 * phase_budget
+  _budget_supplement[_ninth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5313 * phase_budget
+  _budget_supplement[_tenth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5625 * phase_budget
+  _budget_supplement[_11th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5938 * phase_budget
+  _budget_supplement[_12th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6250 * phase_budget
+  _budget_supplement[_13th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6563 * phase_budget
+  _budget_supplement[_14th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6875 * phase_budget
+  _budget_supplement[_15th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.7188 * phase_budget
+  _budget_supplement[_16th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.7500 * phase_budget
+
 
   Atomic::store(&_progress, (size_t) 0L);
   ShenandoahHeap::heap()->start_throttle_for_gc_phase(_mark, initial_budget, phase_budget, projected_work);
@@ -523,21 +559,44 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
   size_t projected_work = (size_t) evac_cost;
   size_t phase_budget = (size_t) (allocatable_words * evac_fraction_of_total);
 
-  assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
-  _work_completed[_first_microphase]  = (size_t) (0.250 * projected_work);  // 1/4 of projected work
-  _work_completed[_second_microphase] = (size_t) (0.375 * projected_work);  // 1/8 more
-  _work_completed[_third_microphase]  = (size_t) (0.5000 * projected_work);  //  1/8 more
-  _work_completed[_fourth_microphase] = (size_t) (0.6250 * projected_work);  //  1/8 more
-  _work_completed[_fifth_microphase]  = (size_t) (0.7500 * projected_work);  //  1/8 more
+  _work_completed[_first_microphase]    = (size_t) (0.03125 * projected_work);   // 1/32 of planned work
+  _work_completed[_second_microphase]   = (size_t) (0.09385 * projected_work);   // 1/16 of planned work
+  _work_completed[_third_microphase]    = (size_t) (0.15625 * projected_work);   // 1/16 of planned work
+  _work_completed[_fourth_microphase]   = (size_t) (0.21875 * projected_work);   // 1/16 of planned work
+  _work_completed[_fifth_microphase]    = (size_t) (0.28125 * projected_work);   // 1/16 of planned work
+  _work_completed[_sixth_microphase]    = (size_t) (0.34375 * projected_work);   // 1/16 of planned work
+  _work_completed[_seventh_microphase]  = (size_t) (0.40625 * projected_work);   // 1/16 of planned work
+  _work_completed[_eighth_microphase]   = (size_t) (0.46875 * projected_work);   // 1/16 of planned work
+  _work_completed[_ninth_microphase]    = (size_t) (0.50000 * projected_work);   // 1/32 of planned work
+  _work_completed[_tenth_microphase]    = (size_t) (0.56250 * projected_work);   // 1/16 of planned work
+  _work_completed[_11th_microphase]     = (size_t) (0.62500 * projected_work);   // 1/16 of planned work
+  _work_completed[_12th_microphase]     = (size_t) (0.68750 * projected_work);   // 1/16 of planned work
+  _work_completed[_13th_microphase]     = (size_t) (0.75000 * projected_work);   // 1/16 of planned work
+  _work_completed[_14th_microphase]     = (size_t) (0.81250 * projected_work);   // 1/16 of planned work
+  _work_completed[_15th_microphase]     = (size_t) (0.87500 * projected_work);   // 1/16 of planned work
+  _work_completed[_16th_microphase]     = (size_t) (0.93750 * projected_work);   // 1/16 of planned work
+
 
   // Initial allocation budget is 0.25 * phase_budget
   size_t initial_budget = phase_budget / 4;
-  _budget_supplement[_first_microphase]  = (size_t) (0.250 * phase_budget);  // Cumulative budget:  1/2 phase_budget
-  _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  5/8 phase_budget
-  _budget_supplement[_third_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget:  3/4 phase_budget
-  _budget_supplement[_fourth_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  7/8 phase_budget
-  _budget_supplement[_fifth_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget: full phase_budget
+  _budget_supplement[_first_microphase]    = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.0938 * phase_budget
+  _budget_supplement[_second_microphase]   = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.1875 * phase_budget
+  _budget_supplement[_third_microphase]    = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.2813 * phase_budget
+  _budget_supplement[_fourth_microphase]   = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.3750 * phase_budget
+  _budget_supplement[_fifth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4063 * phase_budget
+  _budget_supplement[_sixth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4375 * phase_budget
+  _budget_supplement[_seventh_microphase]  = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4688 * phase_budget
+  _budget_supplement[_eighth_microphase]   = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5000 * phase_budget
+  _budget_supplement[_ninth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5313 * phase_budget
+  _budget_supplement[_tenth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5625 * phase_budget
+  _budget_supplement[_11th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5938 * phase_budget
+  _budget_supplement[_12th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6250 * phase_budget
+  _budget_supplement[_13th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6563 * phase_budget
+  _budget_supplement[_14th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6875 * phase_budget
+  _budget_supplement[_15th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.7188 * phase_budget
+  _budget_supplement[_16th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.7500 * phase_budget
 
   Atomic::store(&_progress, (size_t) 0L);
   ShenandoahHeap::heap()->start_throttle_for_gc_phase(_evac, initial_budget, phase_budget, projected_work);
@@ -569,21 +628,43 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
   size_t projected_work = update_cost;
   size_t phase_budget = allocatable_words;
 
-  assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
-  _work_completed[_first_microphase]  = (size_t) (0.250 * projected_work);  // 1/4 of projected work
-  _work_completed[_second_microphase] = (size_t) (0.375 * projected_work);  // 1/8 more
-  _work_completed[_third_microphase]  = (size_t) (0.500 * projected_work);  // 1/8 more
-  _work_completed[_fourth_microphase] = (size_t) (0.625 * projected_work);  // 1/8 more
-  _work_completed[_fifth_microphase]  = (size_t) (0.750 * projected_work);  // 1/8 more
+  _work_completed[_first_microphase]    = (size_t) (0.03125 * projected_work);   // 1/32 of planned work
+  _work_completed[_second_microphase]   = (size_t) (0.09385 * projected_work);   // 1/16 of planned work
+  _work_completed[_third_microphase]    = (size_t) (0.15625 * projected_work);   // 1/16 of planned work
+  _work_completed[_fourth_microphase]   = (size_t) (0.21875 * projected_work);   // 1/16 of planned work
+  _work_completed[_fifth_microphase]    = (size_t) (0.28125 * projected_work);   // 1/16 of planned work
+  _work_completed[_sixth_microphase]    = (size_t) (0.34375 * projected_work);   // 1/16 of planned work
+  _work_completed[_seventh_microphase]  = (size_t) (0.40625 * projected_work);   // 1/16 of planned work
+  _work_completed[_eighth_microphase]   = (size_t) (0.46875 * projected_work);   // 1/16 of planned work
+  _work_completed[_ninth_microphase]    = (size_t) (0.50000 * projected_work);   // 1/32 of planned work
+  _work_completed[_tenth_microphase]    = (size_t) (0.56250 * projected_work);   // 1/16 of planned work
+  _work_completed[_11th_microphase]     = (size_t) (0.62500 * projected_work);   // 1/16 of planned work
+  _work_completed[_12th_microphase]     = (size_t) (0.68750 * projected_work);   // 1/16 of planned work
+  _work_completed[_13th_microphase]     = (size_t) (0.75000 * projected_work);   // 1/16 of planned work
+  _work_completed[_14th_microphase]     = (size_t) (0.81250 * projected_work);   // 1/16 of planned work
+  _work_completed[_15th_microphase]     = (size_t) (0.87500 * projected_work);   // 1/16 of planned work
+  _work_completed[_16th_microphase]     = (size_t) (0.93750 * projected_work);   // 1/16 of planned work
 
   // Initial allocation budget is 0.25 * phase_budget
   size_t initial_budget = phase_budget / 4;
-  _budget_supplement[_first_microphase]  = (size_t) (0.250 * phase_budget);  // Cumulative budget:  1/2 phase_budget
-  _budget_supplement[_second_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  5/8 phase_budget
-  _budget_supplement[_third_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget:  3/4 phase_budget
-  _budget_supplement[_fourth_microphase] = (size_t) (0.125 * phase_budget);  // Cumulative budget:  7/8 phase_budget
-  _budget_supplement[_fifth_microphase]  = (size_t) (0.125 * phase_budget);  // Cumulative budget: full phase_budget
+  _budget_supplement[_first_microphase]    = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.0938 * phase_budget
+  _budget_supplement[_second_microphase]   = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.1875 * phase_budget
+  _budget_supplement[_third_microphase]    = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.2813 * phase_budget
+  _budget_supplement[_fourth_microphase]   = (size_t) (0.0938 * phase_budget);  // + 3/32: Incremental = 0.3750 * phase_budget
+  _budget_supplement[_fifth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4063 * phase_budget
+  _budget_supplement[_sixth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4375 * phase_budget
+  _budget_supplement[_seventh_microphase]  = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.4688 * phase_budget
+  _budget_supplement[_eighth_microphase]   = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5000 * phase_budget
+  _budget_supplement[_ninth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5313 * phase_budget
+  _budget_supplement[_tenth_microphase]    = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5625 * phase_budget
+  _budget_supplement[_11th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.5938 * phase_budget
+  _budget_supplement[_12th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6250 * phase_budget
+  _budget_supplement[_13th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6563 * phase_budget
+  _budget_supplement[_14th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.6875 * phase_budget
+  _budget_supplement[_15th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.7188 * phase_budget
+  _budget_supplement[_16th_microphase]     = (size_t) (0.0313 * phase_budget);  // + 1/32: Incremental = 0.7500 * phase_budget
 
   Atomic::store(&_progress, (size_t) 0L);
   ShenandoahHeap::heap()->start_throttle_for_gc_phase(_update, initial_budget, phase_budget, projected_work);
@@ -599,21 +680,43 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
   publish_metrics_and_increment_epoch();
   
-  assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   // No work will be recorded, so it doesn't really matter what value we store here.
-  _work_completed[_first_microphase]  = (size_t) 0x7fffffffL;
-  _work_completed[_second_microphase] = (size_t) 0x7fffffffL;
-  _work_completed[_third_microphase]  = (size_t) 0x7fffffffL;
-  _work_completed[_fourth_microphase] = (size_t) 0x7fffffffL;
-  _work_completed[_fifth_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_first_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_second_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_third_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_fourth_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_fifth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_sixth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_seventh_microphase] = (size_t) 0x7fffffffL;
+  _work_completed[_eighth_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_ninth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_tenth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_11th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_12th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_13th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_14th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_15th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_16th_microphase]    = (size_t) 0x7fffffffL;
 
   // Everything is budgeted now.  Nothing is held back;
-  _budget_supplement[_first_microphase]  = (size_t) 0;
-  _budget_supplement[_second_microphase] = (size_t) 0;
-  _budget_supplement[_third_microphase]  = (size_t) 0;
-  _budget_supplement[_fourth_microphase] = (size_t) 0;
-  _budget_supplement[_fifth_microphase]  = (size_t) 0;
+  _budget_supplement[_first_microphase]   = (size_t) 0;
+  _budget_supplement[_second_microphase]  = (size_t) 0;
+  _budget_supplement[_third_microphase]   = (size_t) 0;
+  _budget_supplement[_fourth_microphase]  = (size_t) 0;
+  _budget_supplement[_fifth_microphase]   = (size_t) 0;
+  _budget_supplement[_sixth_microphase]   = (size_t) 0;
+  _budget_supplement[_seventh_microphase] = (size_t) 0;
+  _budget_supplement[_eighth_microphase]  = (size_t) 0;
+  _budget_supplement[_ninth_microphase]   = (size_t) 0;
+  _budget_supplement[_tenth_microphase]   = (size_t) 0;
+  _budget_supplement[_11th_microphase]    = (size_t) 0;
+  _budget_supplement[_12th_microphase]    = (size_t) 0;
+  _budget_supplement[_13th_microphase]    = (size_t) 0;
+  _budget_supplement[_14th_microphase]    = (size_t) 0;
+  _budget_supplement[_15th_microphase]    = (size_t) 0;
+  _budget_supplement[_16th_microphase]    = (size_t) 0;
 
   // We don't want throttles during Idle, so we double available
   Atomic::store(&_progress, (size_t) 0L);
@@ -628,21 +731,43 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
   publish_metrics_and_increment_epoch();
 
-  assert(_Microphase_Count == _fifth_microphase + 1, "Otherwise, the initializations that follow are not correct.");
+  assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
   // No work will be recorded, so it doesn't really matter what value we store here.
-  _work_completed[_first_microphase]  = (size_t) 0x7fffffffL;
-  _work_completed[_second_microphase] = (size_t) 0x7fffffffL;
-  _work_completed[_third_microphase]  = (size_t) 0x7fffffffL;
-  _work_completed[_fourth_microphase] = (size_t) 0x7fffffffL;
-  _work_completed[_fifth_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_first_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_second_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_third_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_fourth_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_fifth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_sixth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_seventh_microphase] = (size_t) 0x7fffffffL;
+  _work_completed[_eighth_microphase]  = (size_t) 0x7fffffffL;
+  _work_completed[_ninth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_tenth_microphase]   = (size_t) 0x7fffffffL;
+  _work_completed[_11th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_12th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_13th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_14th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_15th_microphase]    = (size_t) 0x7fffffffL;
+  _work_completed[_16th_microphase]    = (size_t) 0x7fffffffL;
 
   // Everything is budgeted now.  Nothing is held back;
-  _budget_supplement[_first_microphase]  = (size_t) 0;
-  _budget_supplement[_second_microphase] = (size_t) 0;
-  _budget_supplement[_third_microphase]  = (size_t) 0;
-  _budget_supplement[_fourth_microphase] = (size_t) 0;
-  _budget_supplement[_fifth_microphase]  = (size_t) 0;
+  _budget_supplement[_first_microphase]   = (size_t) 0;
+  _budget_supplement[_second_microphase]  = (size_t) 0;
+  _budget_supplement[_third_microphase]   = (size_t) 0;
+  _budget_supplement[_fourth_microphase]  = (size_t) 0;
+  _budget_supplement[_fifth_microphase]   = (size_t) 0;
+  _budget_supplement[_sixth_microphase]   = (size_t) 0;
+  _budget_supplement[_seventh_microphase] = (size_t) 0;
+  _budget_supplement[_eighth_microphase]  = (size_t) 0;
+  _budget_supplement[_ninth_microphase]   = (size_t) 0;
+  _budget_supplement[_tenth_microphase]   = (size_t) 0;
+  _budget_supplement[_11th_microphase]    = (size_t) 0;
+  _budget_supplement[_12th_microphase]    = (size_t) 0;
+  _budget_supplement[_13th_microphase]    = (size_t) 0;
+  _budget_supplement[_14th_microphase]    = (size_t) 0;
+  _budget_supplement[_15th_microphase]    = (size_t) 0;
+  _budget_supplement[_16th_microphase]    = (size_t) 0;
 
   Atomic::store(&_progress, (size_t) 0L);
   ShenandoahHeap::heap()->start_throttle_for_gc_phase(_reset, allocatable_words, allocatable_words, 0);

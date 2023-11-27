@@ -1528,7 +1528,7 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
               // We've waited our obligatory delay.  We can now claim the requested memory if it is still available.
               // If it is not available, we'll continue to wait, but not politely.
               if (claim_throttled_for_alloc(words, false, true)) {
-                // no longer need to throttle, but we whould record the throttling we already experienced.
+                // No longer need to throttle.  Record the throttling we already experienced.
                 throttled_request._epoch_at_end = throttle_epoch();
 #ifdef KELVIN_REPORT_GRANT_MEMORY
                 throttled_request._grant_memory_time = throttled_request._end_throttle_time;
@@ -1550,7 +1550,7 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
               // amount of allocatable words may have shrunk, making my request appear to be greedy even though
               // it wasn't originally greedy.
               if (claim_throttled_for_alloc(words, false, true)) {
-                // no longer need to throttle.
+                // No longer need to throttle.
                 throttled_request._epoch_at_end = throttle_epoch();
 #ifdef KELVIN_REPORT_GRANT_MEMORY
                 throttled_request._grant_memory_time = throttled_request._end_throttle_time;
@@ -3832,7 +3832,7 @@ void ShenandoahHeap::log_heap_status(const char* msg) const {
 // Throttling implementation follows
 
 
-const uintx ShenandoahHeap::MAX_THROTTLE_DELAY_MS = 16;
+const uintx ShenandoahHeap::MAX_THROTTLE_DELAY_MS = 64;
 const uintx ShenandoahHeap::MIN_THROTTLE_DELAY_MS = 4;
 
 // Principles of operation
@@ -3877,7 +3877,7 @@ void ShenandoahHeap::start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id
     _phase_carryovers = 0;
 
     size_t original_queue_length = _throttle_queue_length;
-    intptr_t words_remaining = grant_memory_to_throttled_requests(initial_budget, true);
+    intptr_t words_remaining = grant_memory_to_throttled_requests((size_t) 0, initial_budget, true);
     set_throttle_budget(words_remaining);
     // if more than half of queued threads were removed from queue, notify all threads
     if (_throttle_queue_length * 2 < original_queue_length) {
@@ -4114,15 +4114,15 @@ void ShenandoahHeap::remove_throttled_request_from_queue(ShenandoahThrottledAllo
 
 // Distribute newly available memory to throttled threads.  For each thread whose request is granted, remove it from queue.
 // Return the remnant number of words that were not allotted to any queueud throttle requests
-intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_words, bool force_queue_to_be_empty) {
+intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t previously_available, intptr_t newly_available,
+                                                            bool force_queue_to_be_empty) {
   shenandoah_assert_heaplocked();
-
-  ShenandoahThrottledAllocRequest *predecessor, *candidate;
+  ShenandoahThrottledAllocRequest *predecessor, *candidate, *next_candidate;
+  intptr_t available_words = previously_available + newly_available;
 
 #ifdef KELVIN_REPORT_GRANT_MEMORY
   double now = os::elapsedTime();
   double earliest_pending = now;
-  size_t potential_grant = available_words;
   size_t reqs_not_granted = 0;
   size_t reqs_granted = 0;
   size_t words_not_granted = 0;
@@ -4137,8 +4137,11 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
 #ifdef KELVIN_REPORT_GRANT_MEMORY
       words_granted += candidate->_requested_words;
       reqs_granted++;
+      if (candidate->_start_throttle_time < earliest_pending) {
+        earliest_pending = candidate->_start_throttle_time;
+      }
 #endif
-      candidiate->_is_granted = true;
+      candidate->_is_granted = true;
       next_candidate = candidate->_next;
       candidate->_prev = nullptr;
       candidate->_next = nullptr;
@@ -4224,11 +4227,14 @@ intptr_t ShenandoahHeap::grant_memory_to_throttled_requests(intptr_t available_w
     }
   }
 #ifdef KELVIN_REPORT_GRANT_MEMORY
-  if ((reqs_granted > 0) || (reqs_not_granted > 0)) {
+  // once we start reporting, report them all.
+//  if ((reqs_granted > 0) || (reqs_not_granted > 0) || (_num_grant_memory_entries > 0)) {
+  if (true) {
     _grant_memory_log[_num_grant_memory_entries].time_since_last = now - _time_at_last_grant;
     _grant_memory_log[_num_grant_memory_entries].earliest_pending = earliest_pending;
     _grant_memory_log[_num_grant_memory_entries].time_of = now;
-    _grant_memory_log[_num_grant_memory_entries].potential_grant = potential_grant;
+    _grant_memory_log[_num_grant_memory_entries].originally_avail = previously_available;
+    _grant_memory_log[_num_grant_memory_entries].newly_avail = newly_available;
     _grant_memory_log[_num_grant_memory_entries].reqs_granted = reqs_granted;
     _grant_memory_log[_num_grant_memory_entries].reqs_not_granted = reqs_not_granted;
     _grant_memory_log[_num_grant_memory_entries].words_granted = words_granted;
@@ -4252,18 +4258,17 @@ void ShenandoahHeap::add_to_throttle_budget(size_t budgeted_words) {
     ShenandoahHeapLocker locker(lock());
 
     _authorized_to_not_throttle += budgeted_words;
-    budgeted_words += get_throttle_budget();
     if (budgeted_words > 0) {
       size_t original_queue_length = throttled_thread_count();
-      budgeted_words = grant_memory_to_throttled_requests(budgeted_words, true);
+      budgeted_words = grant_memory_to_throttled_requests(get_throttle_budget(), budgeted_words, true);
       // if more than half of queued threads were removed from queue, notify all threads
       if (throttled_thread_count() * 2 < original_queue_length) {
         notify_throttled = true;
       }
       // Otherwise, we allow each thread to individually wake from its sleep state and discover that its
       // request has been granted at that time.
+      set_throttle_budget(budgeted_words);
     }
-    set_throttle_budget(budgeted_words);
   }  // Release the heaplock
 
   if (notify_throttled) {
@@ -4411,15 +4416,16 @@ void ShenandoahHeap::log_metrics_and_prep_for_next(double evac_update_factor) {
 
 #ifdef KELVIN_REPORT_GRANT_MEMORY
   if (_num_grant_memory_entries > 0) {
-    log_info(gc)("%12s %12s %12s %12s %12s %12s %12s %12s %12s",
-                 "GrantLog", "GrantTime", "SincePrev", "OldestStart", "PotentGrant", "ReqsGranted", "WordsGranted", "ReqsRejected",
+    log_info(gc)("%12s %12s %12s %12s %12s %12s %12s %12s %12s %12s",
+                 "GrantLog", "GrantTime", "SincePrev", "OldestStart", "OrigAvail", "NewAvail",
+                 "ReqsGranted", "WordsGranted", "ReqsRejected",
                  "WordsRejected");
     for (size_t i = 0; i < _num_grant_memory_entries; i++) {
       struct grant_log* entry = &_grant_memory_log[i];
       log_info(gc)(SIZE_FORMAT_W(12) " %12.6f %12.6f %12.6f " SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12) " "
-                   SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12),
+                   SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12) " " SIZE_FORMAT_W(12),
                    i, entry->time_of, entry->time_since_last, entry->time_of - entry->earliest_pending,
-                   entry->potential_grant, entry->reqs_granted, entry->words_granted,
+                   entry->originally_avail, entry->newly_avail, entry->reqs_granted, entry->words_granted,
                    entry->reqs_not_granted, entry->words_not_granted);
     }
     _num_grant_memory_entries = 0;
@@ -4453,11 +4459,10 @@ void ShenandoahHeap::unthrottle_for_alloc(ShenandoahThrottledAllocRequest* origi
     // Stale ticket, no need to unthrottle
     return;
   }
-  intptr_t words = get_throttle_budget() + excess_words;
-  if (words > 0) {
+  if (excess_words > 0) {
     size_t original_queue_length = throttled_thread_count();
-    words = grant_memory_to_throttled_requests(words, false);
-    set_throttle_budget(words);
+    excess_words = grant_memory_to_throttled_requests(get_throttle_budget(), excess_words, false);
+    set_throttle_budget(excess_words);
     if (throttled_thread_count() * 2 < original_queue_length) {
       // Plan to notify all throttled threads if we granted memory to more than half of previously throttled threads.
       // But we don't notify from here because we are holding the heap lock.
@@ -4466,5 +4471,8 @@ void ShenandoahHeap::unthrottle_for_alloc(ShenandoahThrottledAllocRequest* origi
       // every invocation if we use <= comparison.
       wake_throttled();
     }
+  } else {
+    // Don't really expect this use case
+    set_throttle_budget(get_throttle_budget() + excess_words);
   }
 }
