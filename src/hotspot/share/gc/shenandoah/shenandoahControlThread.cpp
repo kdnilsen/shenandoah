@@ -758,16 +758,13 @@ void ShenandoahControlThread::service_concurrent_cycle(ShenandoahHeap* heap,
     // We're about to start up concurrent old marking. This counts as idle time insofar as young-gen triggering
     // heuristics are concerned.
     //
-    // We double the allocation runway for idle because we do not want any throttling during idle spans.
     // In theory, we could use throttling to prevent out-of-cycle degeneration, but we need to be very careful
     // that throttling does not prevent us from trigger.  It has been observed that throttling may cause us to
     // not trigger the next GC because it prevents allocation pool from being depleted.
     heap->throttler()->setup_for_idle(allocation_runway);
     shenandoah_assert_not_heaplocked();
-    if (ShenandoahThrottleAllocations) {
-      // New allocation budget granted with setup_for_idle, so ...
-      heap->notify_throttled_waiters();
-    }
+    // New allocation budget granted with setup_for_idle, so ...
+    heap->notify_throttled_waiters();
   }
 }
 
