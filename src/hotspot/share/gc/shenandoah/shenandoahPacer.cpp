@@ -371,9 +371,9 @@ ShenandoahThrottler::ShenandoahThrottler(ShenandoahHeap* heap) :
     _progress(0) {
 }
 
-void ShenandoahThrottler::publish_metrics_and_increment_epoch() {
+void ShenandoahThrottler::publish_metrics_and_increment_epoch(GCPhase id) {
   // Accumulations deal with multiple Idle phases.
-  _heap->absorb_throttle_metrics_and_increment_epoch(_progress);
+  _heap->absorb_throttle_metrics_and_increment_epoch(_progress, id);
 }
 
 const char* ShenandoahThrottler::phase_name(GCPhase p) {
@@ -389,7 +389,7 @@ const char* ShenandoahThrottler::phase_name(GCPhase p) {
 
 void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when allocation throttling is enabled");
-  publish_metrics_and_increment_epoch();
+  publish_metrics_and_increment_epoch(_mark);
 
   // During marking, work progress is represented by total words marked.  Accumulation of marked words during marking
   // is not linear.  During the initial stages of marking, almost every object seen has not yet been marked.  During
@@ -460,22 +460,23 @@ void ShenandoahThrottler::setup_for_mark(size_t words_allocatable, bool is_globa
 
   // Note that we typically overbudget work for marking by a factor of 6 (usually, all work is completed at 17-50% of projected)
   // We intentionally sum to 100%, because rare scenarios may require even more than projected_work to complete
-  _work_completed[_first_microphase]    = (size_t) (0.015625 * projected_work);   // add 1/64
-  _work_completed[_second_microphase]   = (size_t) (0.031250 * projected_work);   // add 1/64
-  _work_completed[_third_microphase]    = (size_t) (0.046875 * projected_work);   // add 1/64
-  _work_completed[_fourth_microphase]   = (size_t) (0.078125 * projected_work);   // add 1/32
-  _work_completed[_fifth_microphase]    = (size_t) (0.109375 * projected_work);   // add 1/32
-  _work_completed[_sixth_microphase]    = (size_t) (0.140625 * projected_work);   // add 1/32
-  _work_completed[_seventh_microphase]  = (size_t) (0.171875 * projected_work);   // add 1/32
-  _work_completed[_eighth_microphase]   = (size_t) (0.234375 * projected_work);   // add 1/16 
-  _work_completed[_ninth_microphase]    = (size_t) (0.296875 * projected_work);   // add 1/16
-  _work_completed[_tenth_microphase]    = (size_t) (0.390625 * projected_work);   // add 1/16 + 1/32
-  _work_completed[_11th_microphase]     = (size_t) (0.484375 * projected_work);   // add 1/16 + 1/32
-  _work_completed[_12th_microphase]     = (size_t) (0.578125 * projected_work);   // add 1/16 + 1/32
-  _work_completed[_13th_microphase]     = (size_t) (0.671875 * projected_work);   // add 1/16 + 1/32
-  _work_completed[_14th_microphase]     = (size_t) (0.781250 * projected_work);   // add 1/16 + 1/32 + 1/64
-  _work_completed[_15th_microphase]     = (size_t) (0.890625 * projected_work);   // add 1/16 + 1/32 + 1/64
-  _work_completed[_16th_microphase]     = (size_t) (1.000000 * projected_work);   // add 1/16 + 1/32 + 1/64
+  _work_completed[_first_microphase]    = (size_t) (0.031250 * projected_work);   // add 1/32
+  _work_completed[_second_microphase]   = (size_t) (0.062500 * projected_work);   // add 1/32
+  _work_completed[_third_microphase]    = (size_t) (0.093750 * projected_work);   // add 1/32
+  _work_completed[_fourth_microphase]   = (size_t) (0.156250 * projected_work);   // add 1/16
+  _work_completed[_fifth_microphase]    = (size_t) (0.218800 * projected_work);   // add 1/16
+  _work_completed[_sixth_microphase]    = (size_t) (0.281250 * projected_work);   // add 1/16
+  _work_completed[_seventh_microphase]  = (size_t) (0.343750 * projected_work);   // add 1/16
+  _work_completed[_eighth_microphase]   = (size_t) (0.406250 * projected_work);   // add 1/16 
+  _work_completed[_ninth_microphase]    = (size_t) (0.468750 * projected_work);   // add 1/16
+  _work_completed[_tenth_microphase]    = (size_t) (0.531250 * projected_work);   // add 1/16
+  _work_completed[_11th_microphase]     = (size_t) (0.609375 * projected_work);   // add 1/16 + 1/64
+  _work_completed[_12th_microphase]     = (size_t) (0.687500 * projected_work);   // add 1/16 + 1/64
+  _work_completed[_13th_microphase]     = (size_t) (0.765625 * projected_work);   // add 1/16 + 1/64
+  _work_completed[_14th_microphase]     = (size_t) (0.843750 * projected_work);   // add 1/16 + 1/64
+  _work_completed[_15th_microphase]     = (size_t) (0.921875 * projected_work);   // add 1/16 + 1/64
+  _work_completed[_16th_microphase]     = (size_t) (1.000000 * projected_work);   // add 1/16 + 1/64
+
 
   // The most common case is that marking is completed by the end of twelfth microphase, so front-load the budget.
   // Initial allocation budget is 0.25 * phase_budget
@@ -505,7 +506,7 @@ void ShenandoahThrottler::setup_for_evac(size_t allocatable_words, size_t evac_w
                                          size_t uncollected_young_words, size_t uncollected_old_words,
                                          bool is_mixed, bool is_global, bool is_bootstrap) {
   assert(ShenandoahThrottleAllocations, "Only be here when pacing is enabled");
-  publish_metrics_and_increment_epoch();
+  publish_metrics_and_increment_epoch(_evac);
 
   // Note that promo_in_place words are initially part of uncollected_young_words, but they end up as uncollected_old_words
   //
@@ -604,7 +605,7 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
                                                size_t uncollected_young_words, size_t uncollected_old_words,
                                                bool is_mixed_or_global) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-  publish_metrics_and_increment_epoch();
+  publish_metrics_and_increment_epoch(_update);
 
   // We use uncollected words to estimate the update-refs effort.  We are consistent between budgeting (here) and
   // reporting, as update-refs work is completed.  A more accurate estimate would be uncollected-words below
@@ -676,7 +677,7 @@ void ShenandoahThrottler::setup_for_updaterefs(size_t allocatable_words, size_t 
  */
 void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-  publish_metrics_and_increment_epoch();
+  publish_metrics_and_increment_epoch(_idle);
   
   assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
@@ -727,7 +728,7 @@ void ShenandoahThrottler::setup_for_idle(size_t allocatable_words) {
  */
 void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   assert(ShenandoahThrottleAllocations, "Only be here when throttling is enabled");
-  publish_metrics_and_increment_epoch();
+  publish_metrics_and_increment_epoch(_reset);
 
   assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 

@@ -1053,7 +1053,7 @@ private:
 
   void remove_throttled_request_from_queue(ShenandoahThrottledAllocRequest* forced_request);
 
-  void log_metrics_and_prep_for_next(double evac_update_factor);
+  void log_metrics_and_prep_for_next(double evac_update_factor, ShenandoahThrottler::GCPhase degen_point);
 
   double recalibrate_phase_efforts(double evac_update_factor);
 
@@ -1081,7 +1081,7 @@ public:
 
   inline void notify_throttled_waiters();
 
-  void absorb_throttle_metrics_and_increment_epoch(size_t progress);
+  void absorb_throttle_metrics_and_increment_epoch(size_t progress, ShenandoahThrottler::GCPhase this_phase);
 
   void start_throttle_for_gc_phase(ShenandoahThrottler::GCPhase id,
                                    size_t initial_budget, size_t phase_budget, size_t planned_work);

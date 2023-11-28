@@ -318,7 +318,7 @@ public:
   static const char* phase_name(GCPhase p);
 
 private:
-  void publish_metrics_and_increment_epoch();
+  void publish_metrics_and_increment_epoch(GCPhase id);
   inline void report_internal(size_t words);
   inline void report_progress_internal(size_t words);
   inline void add_budget(size_t words);
