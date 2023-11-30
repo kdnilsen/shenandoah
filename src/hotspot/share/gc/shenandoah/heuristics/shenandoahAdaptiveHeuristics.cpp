@@ -556,6 +556,8 @@ uint ShenandoahAdaptiveHeuristics::gc_surge_requested() {
     if (_surge_level == 0) {
       result = 2;
     } else {
+      // Note that we'll increment thrice from reset to mark, because we query this function once for remembered set
+      // scanning, once again for concurrent marking roots, and a third time for concurrent marking
       result = MIN2(_surge_level + 1, (uint) 4);
     }
     // e.g. if mark was surged and it still had throttles, then increase the surge.
@@ -575,7 +577,7 @@ uint ShenandoahAdaptiveHeuristics::gc_surge_requested() {
     _surge_level = MAX2(result, _surge_level);
     return result;
   } else if (_previous_cycle_was_throttled || _min_threshold_trigger || (_accelerated_spike_overrun > 1.25) ||
-             (_accelerated_consumption_overrun > 1.15) || (_previous_cycle_surge_level > 1)) {
+             (_accelerated_consumption_overrun > 1.15) || (_previous_cycle_surge_level > 2)) {
     // Since _accelerated_spike_overrun is a noisy trigger, do not surge more than 1 for that.  This allows quicker recovery.
     uint result = 1;
     _surge_level = MAX2(result, _surge_level);

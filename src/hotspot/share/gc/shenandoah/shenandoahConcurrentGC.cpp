@@ -445,7 +445,7 @@ void ShenandoahConcurrentGC::entry_scan_remembered_set() {
     ShenandoahWorkerScope scope(heap->workers(),
                                 ShenandoahWorkerPolicy::calc_workers_for_rs_scanning(),
                                 msg);
-    //not a separate phase insofar as need to report throttle_workers
+    // Not a separate phase insofar as need to report throttle_workers.
 
     heap->try_inject_alloc_failure();
     _generation->scan_remembered_set(true /* is_concurrent */);
@@ -461,9 +461,7 @@ void ShenandoahConcurrentGC::entry_mark_roots() {
 
   uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_marking();
   ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent marking roots");
-  if (ShenandoahThrottleAllocations) {
-    heap->report_throttle_workers(ShenandoahThrottler::_mark, num_workers);
-  }
+  // Report after entry mark.
 
   heap->try_inject_alloc_failure();
   op_mark_roots();
@@ -478,7 +476,9 @@ void ShenandoahConcurrentGC::entry_mark() {
 
   uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_marking();
   ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent marking");
-  // already reported throttle_workers with entry_mark_roots
+  if (ShenandoahThrottleAllocations) {
+    heap->report_throttle_workers(ShenandoahThrottler::_mark, num_workers);
+  }
 
   heap->try_inject_alloc_failure();
   op_mark();

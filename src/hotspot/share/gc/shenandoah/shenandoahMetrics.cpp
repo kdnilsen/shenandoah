@@ -44,8 +44,10 @@ void ShenandoahMetricsSnapshot::snap_after() {
 }
 
 bool ShenandoahMetricsSnapshot::is_good_progress() {
-  // Under the critical threshold?
-  size_t free_actual   = _heap->free_set()->available();
+  // The critical threshold is described in terms of memory available within the heap.?
+  // This includes mutator_free + collector_reserve + old_collector_reserve
+  size_t free_actual =
+    _heap->free_set()->available() + _heap->free_set()->collector_free() + _heap->free_set()->old_collector_free();
   size_t free_expected = _heap->max_capacity() / 100 * ShenandoahCriticalFreeThreshold;
   bool prog_free = free_actual >= free_expected;
   log_info(gc, ergo)("%s progress for free space: " SIZE_FORMAT "%s, need " SIZE_FORMAT "%s",
