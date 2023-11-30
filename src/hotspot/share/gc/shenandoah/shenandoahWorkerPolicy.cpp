@@ -26,7 +26,10 @@
 
 #include "gc/shared/gc_globals.hpp"
 #include "gc/shared/workerPolicy.hpp"
+#include "gc/shenandoah/shenandoahHeap.hpp"
 #include "gc/shenandoah/shenandoahWorkerPolicy.hpp"
+#include "gc/shenandoah/heuristics/shenandoahHeuristics.hpp"
+#include "gc/shenandoah/heuristics/shenandoahYoungHeuristics.hpp"
 #include "runtime/javaThread.hpp"
 #include "runtime/threads.hpp"
 
@@ -54,21 +57,77 @@ uint ShenandoahWorkerPolicy::calc_workers_for_init_marking() {
 }
 
 uint ShenandoahWorkerPolicy::calc_workers_for_conc_marking() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_marking == 0) ?  ConcGCThreads : _prev_conc_marking;
   _prev_conc_marking =
     WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                            active_workers,
                                            Threads::number_of_non_daemon_threads());
   return _prev_conc_marking;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }
 
 uint ShenandoahWorkerPolicy::calc_workers_for_rs_scanning() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_rs_scanning == 0) ? ConcGCThreads : _prev_conc_rs_scanning;
   _prev_conc_rs_scanning =
     WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                            active_workers,
                                            Threads::number_of_non_daemon_threads());
   return _prev_conc_rs_scanning;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }
 
 // Reuse the calculation result from init marking
@@ -78,32 +137,116 @@ uint ShenandoahWorkerPolicy::calc_workers_for_final_marking() {
 
 // Calculate workers for concurrent refs processing
 uint ShenandoahWorkerPolicy::calc_workers_for_conc_refs_processing() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_refs_proc == 0) ? ConcGCThreads : _prev_conc_refs_proc;
   _prev_conc_refs_proc =
     WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                            active_workers,
                                            Threads::number_of_non_daemon_threads());
   return _prev_conc_refs_proc;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }
 
 // Calculate workers for concurrent root processing
 uint ShenandoahWorkerPolicy::calc_workers_for_conc_root_processing() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_root_proc == 0) ? ConcGCThreads : _prev_conc_root_proc;
   _prev_conc_root_proc =
           WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                                  active_workers,
                                                  Threads::number_of_non_daemon_threads());
   return _prev_conc_root_proc;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }
 
 // Calculate workers for concurrent evacuation (concurrent GC)
 uint ShenandoahWorkerPolicy::calc_workers_for_conc_evac() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_evac == 0) ? ConcGCThreads : _prev_conc_evac;
   _prev_conc_evac =
     WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                            active_workers,
                                            Threads::number_of_non_daemon_threads());
   return _prev_conc_evac;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }
 
 // Calculate workers for parallel fullgc
@@ -128,12 +271,40 @@ uint ShenandoahWorkerPolicy::calc_workers_for_stw_degenerated() {
 
 // Calculate workers for concurrent reference update
 uint ShenandoahWorkerPolicy::calc_workers_for_conc_update_ref() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_update_ref == 0) ? ConcGCThreads : _prev_conc_update_ref;
   _prev_conc_update_ref =
     WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                            active_workers,
                                            Threads::number_of_non_daemon_threads());
   return _prev_conc_update_ref;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }
 
 // Calculate workers for parallel reference update
@@ -147,19 +318,75 @@ uint ShenandoahWorkerPolicy::calc_workers_for_final_update_ref() {
 }
 
 uint ShenandoahWorkerPolicy::calc_workers_for_conc_cleanup() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_cleanup == 0) ? ConcGCThreads : _prev_conc_cleanup;
   _prev_conc_cleanup =
           WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                                  active_workers,
                                                  Threads::number_of_non_daemon_threads());
   return _prev_conc_cleanup;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }
 
 uint ShenandoahWorkerPolicy::calc_workers_for_conc_reset() {
+#ifdef KELVIN_DEPRECATE
   uint active_workers = (_prev_conc_reset == 0) ? ConcGCThreads : _prev_conc_reset;
   _prev_conc_reset =
           WorkerPolicy::calc_active_conc_workers(ConcGCThreads,
                                                  active_workers,
                                                  Threads::number_of_non_daemon_threads());
   return _prev_conc_reset;
+#else
+  uint surge = ShenandoahHeap::heap()->young_heuristics()->gc_surge_requested();
+  uint active_workers;
+  switch (surge) {
+    default:
+    case 0:
+      active_workers = ConcGCThreads;
+      break;
+    case 1:
+      active_workers = ConcGCThreads * 5 / 4;
+      break;
+    case 2:
+      active_workers = ConcGCThreads * 6 / 4;
+      break;
+    case 3:
+      active_workers = ConcGCThreads * 7 / 4;
+      break;
+    case 4:
+      active_workers = ConcGCThreads * 8 / 4;
+      break;
+  }
+  if (active_workers > ParallelGCThreads) {
+    active_workers = ParallelGCThreads;
+  }
+  return WorkerPolicy::calc_active_conc_workers(active_workers, active_workers,
+                                                Threads::number_of_non_daemon_threads());
+#endif
 }

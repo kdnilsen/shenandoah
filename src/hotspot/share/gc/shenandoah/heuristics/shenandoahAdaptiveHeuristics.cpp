@@ -96,7 +96,14 @@ ShenandoahAdaptiveHeuristics::ShenandoahAdaptiveHeuristics(ShenandoahSpaceInfo* 
   _spike_acceleration_rate_samples(NEW_C_HEAP_ARRAY(double, ShenandoahRateAccelerationSampleSize, mtGC)),
   _spike_acceleration_rate_timestamps(NEW_C_HEAP_ARRAY(double, ShenandoahRateAccelerationSampleSize, mtGC)),
   _most_recent_headroom_at_start_of_idle(0),
-  _acceleration_goodness_ratio(ShenandoahInitialAcceleratedAllocationRateGoodnessRatio) { }
+  _acceleration_goodness_ratio(ShenandoahInitialAcceleratedAllocationRateGoodnessRatio),
+  _phase_has_throttled(0),
+  _previous_cycle_was_throttled(0),
+  _surge_level(0),
+  _previous_cycle_surge_level(0),
+  _accelerated_spike_overrun(0.0),
+  _accelerated_consumption_overrun(0.0),
+  _min_threshold_trigger(false) { }
 
 ShenandoahAdaptiveHeuristics::~ShenandoahAdaptiveHeuristics() {
   FREE_C_HEAP_ARRAY(double, _spike_acceleration_rate_samples);
@@ -518,6 +525,84 @@ size_t ShenandoahAdaptiveHeuristics::allocatable() {
   }
 }
 
+// This is called by ShenandoahThrottler at the end of each GC cycle.
+void ShenandoahAdaptiveHeuristics::throttle_cycle_has_ended() {
+  assert(ShenandoahThrottleAllocations, "Only called if throttling is enabled");
+  _previous_cycle_was_throttled = _phase_has_throttled;
+  _previous_cycle_surge_level = _surge_level;;
+  _phase_has_throttled = false;
+  _surge_level = 0;
+  _accelerated_spike_overrun = 0.0;
+  _accelerated_consumption_overrun = 0.0;
+  _min_threshold_trigger = false;
+}
+
+// This is called by ShenandoahThrottler only if it detects throttling in the most recently executed microphase
+void ShenandoahAdaptiveHeuristics::report_phase_has_throttled() {
+  assert(ShenandoahThrottleAllocations, "Only called if throttling is enabled");
+  _phase_has_throttled = true;
+}
+
+uint ShenandoahAdaptiveHeuristics::gc_surge_requested() {
+  assert(ShenandoahThrottleAllocations, "Only called if throttling is enabled");
+
+  if (_previous_cycle_was_throttled && _previous_cycle_surge_level > 0) {
+    uint result = MIN2(_previous_cycle_surge_level + 1, (uint) 4);
+    _surge_level = MAX2(result, _surge_level);
+    return result;;
+  } else if (_phase_has_throttled && _surge_level > 0) {
+    // e.g. if mark was surged and it still had throttles, then increase the surge.
+    //      Suppose mark was throttled without surge.  This causes us to surge evac, which may or may not experience additional
+    //      throttling.  As we prepare to begin update refs, we discover that both _phase_has_throttled and _surge_level > 0,
+    //      so we upgrade the surge request for update.  That's ok.  Given that we've been throttling in this phase, let's
+    //      invest in finishing the GC as soon as possible so that we can "catch up" and recover stability.
+    uint result = MIN2(_surge_level + 1, (uint) 4);
+    _surge_level = MAX2(result, _surge_level);
+    return result;;
+  } else if (_previous_cycle_was_throttled && _previous_cycle_surge_level > 0) {
+    uint result = MIN2(_previous_cycle_surge_level + 1, (uint) 4);
+    _surge_level = MAX2(result, _surge_level);
+    return result;
+  } else if (_accelerated_consumption_overrun > 4.0) {
+    uint result = 4;
+    _surge_level = MAX2(result, _surge_level);
+    return result;;
+  } else if ((_accelerated_spike_overrun > 3.0) || (_accelerated_consumption_overrun > 2.0)) {
+    // Big spike requires a big surge.
+    uint result = 3;
+    _surge_level = MAX2(result, _surge_level);
+    return result;
+  } else if ((_accelerated_spike_overrun > 2.0) || (_accelerated_consumption_overrun > 1.5)) {
+    // Medium spike requires a medium surge
+    uint result = 2;
+    _surge_level = MAX2(result, _surge_level);
+    return result;
+  } else if (_previous_cycle_was_throttled) {
+    // and we know _previous_cycle_surge_level was 0
+    uint result = 1;
+    _surge_level = MAX2(result, _surge_level);
+    return result;
+  } else if (_min_threshold_trigger) {
+    uint result= 1;
+    _surge_level = MAX2(result, _surge_level);
+    return result;
+  } else if (_accelerated_spike_overrun > 1.25) {
+    // Small spike requires a small surge.  If less than 25% overrun, no surge.  Normal headroom allowance is sufficient.
+    uint result = 1;
+    _surge_level = MAX2(result, _surge_level);
+    return result;
+  } else if (_previous_cycle_surge_level > 1) {
+    // We know that previous cycle was not throttled.  It may be that the only reason it did not need to be throttled was
+    // because we had surged the worker threads.  So we gradually decrease the surge level, watching to see if this
+    // introduces the need for new throttling.
+    uint result = 1;
+    _surge_level = MAX2(result, _surge_level);
+    return result;
+  } else {
+    return 0;
+  }
+}
+
 bool ShenandoahAdaptiveHeuristics::should_start_gc() {
 #ifdef KELVIN_DEPRECATE
   size_t allocation_headroom = available;
@@ -581,11 +666,20 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
 
   add_rate_to_acceleration_history(now, instantaneous_rate);
   size_t consumption_accelerated = accelerated_consumption(acceleration, current_alloc_rate, future_planned_gc_time);
+
+  // These values may feed into surge request even if we do not trigger for acceleration
+  if (acceleration > 0.0) {
+    _accelerated_consumption_overrun = consumption_accelerated / (double) allocatable;
+  } else {
+    _accelerated_spike_overrun = consumption_accelerated / (double) allocatable;
+  }
+
   size_t min_threshold = min_free_threshold();
   if (available < min_threshold) {
     log_info(gc)("Trigger (%s): Free (" SIZE_FORMAT "%s) is below minimum threshold (" SIZE_FORMAT "%s)", _space_info->name(),
                  byte_size_in_proper_unit(available), proper_unit_for_byte_size(available),
                  byte_size_in_proper_unit(min_threshold), proper_unit_for_byte_size(min_threshold));
+    _min_threshold_trigger = true;
     return true;
   }
 

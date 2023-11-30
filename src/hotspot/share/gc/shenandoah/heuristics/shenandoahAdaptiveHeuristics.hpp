@@ -85,6 +85,10 @@ public:
                                                      RegionData* data, size_t size,
                                                      size_t actual_free);
 
+  virtual uint gc_surge_requested();
+  virtual void report_phase_has_throttled();
+  virtual void throttle_cycle_has_ended();
+
   virtual void adjust_penalty(intx step);
 
   // In case we rebuild free set during idle span, such as when we finish OLD GC marking and add immediate garbage to
@@ -218,6 +222,14 @@ protected:
   double _acceleration_goodness_ratio;
 
   size_t min_free_threshold();
+
+  bool _phase_has_throttled;
+  bool _previous_cycle_was_throttled;
+  uint _surge_level;
+  uint _previous_cycle_surge_level;
+  double _accelerated_spike_overrun;
+  double _accelerated_consumption_overrun;
+  bool _min_threshold_trigger;
 };
 
 #endif // SHARE_GC_SHENANDOAH_HEURISTICS_SHENANDOAHADAPTIVEHEURISTICS_HPP

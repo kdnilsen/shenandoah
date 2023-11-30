@@ -93,7 +93,7 @@ class VMStructs;
 typedef uint16_t ShenandoahLiveData;
 #define SHENANDOAH_LIVEDATA_MAX ((ShenandoahLiveData)-1)
 
-#define KELVIN_REPORT_GRANT_MEMORY
+#undef KELVIN_REPORT_GRANT_MEMORY
 
 
 struct shenandoah_throttled_alloc_req {
@@ -964,6 +964,7 @@ private:
   size_t _phase_carryovers;
 
   // Metrics gathered for logging
+  uint _log_workers[ShenandoahThrottler::_GCPhase_Count];
   size_t _log_effort[ShenandoahThrottler::_GCPhase_Count];
   size_t _log_progress[ShenandoahThrottler::_GCPhase_Count];
   size_t _log_budget[ShenandoahThrottler::_GCPhase_Count];
@@ -1091,6 +1092,8 @@ public:
 
   // Called by ShenandoahThrottler each time new memory is budgeted and authorized
   void add_to_throttle_budget(size_t budgeted_words);
+
+  void report_throttle_workers(ShenandoahThrottler::GCPhase id, uint num_workers);
 };
 
 #endif // SHARE_GC_SHENANDOAH_SHENANDOAHHEAP_HPP

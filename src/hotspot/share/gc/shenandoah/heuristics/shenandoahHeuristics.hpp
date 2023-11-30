@@ -165,6 +165,12 @@ public:
   virtual bool is_experimental() = 0;
   virtual void initialize();
 
+  // Return 0 for no surge, 1: 25% surge, 2: 50% surge, 3: 75% surge, 4: 100% surge
+  virtual uint gc_surge_requested();
+
+  virtual void report_phase_has_throttled();
+  virtual void throttle_cycle_has_ended();
+
   double elapsed_cycle_time() const;
   double elapsed_degenerated_cycle_time() const;
 };

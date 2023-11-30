@@ -535,6 +535,8 @@ jint ShenandoahHeap::initialize() {
     _log_allocatable_at_end[p]   = 0;
     _log_carryovers[p]           = 0;
 
+    _log_workers[p]              = 0;
+
     _requests_stalled_sum[p]     = 0;
     _words_stalled_sum[p]        = 0;
     _available_sum[p]            = 0;
@@ -1756,7 +1758,7 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
         return result;
       } // This closes the block that holds the heap lock, releasing the lock.
     }   // This closes the inner nested infinite loop.  We break out of the inner-nested loop so we can throttle
-#define KELVIN_THROTTLE_DELAY
+#undef KELVIN_THROTTLE_DELAY
 #ifdef KELVIN_THROTTLE_DELAY
     double most_recent_timestamp;
 #endif
@@ -3921,6 +3923,7 @@ void ShenandoahHeap::absorb_throttle_metrics_and_increment_epoch(size_t progress
     _log_allocated[_phase_label]   += allocated;
 
     _log_requests[_phase_label]             += _allocation_requests_throttled;
+
     _log_words_throttled[_phase_label]      += _total_words_throttled;
     _log_min_words_throttled[_phase_label]   = MIN2(_min_words_throttled, _log_min_words_throttled[_phase_label]);
     _log_max_words_throttled[_phase_label]   = MAX2(_max_words_throttled, _log_max_words_throttled[_phase_label]);
@@ -3940,6 +3943,10 @@ void ShenandoahHeap::absorb_throttle_metrics_and_increment_epoch(size_t progress
     _log_allocatable_at_end[_phase_label] = MAX2(_words_to_not_throttle, _log_allocatable_at_end[_phase_label]);
 
     _log_carryovers[_phase_label]        += _phase_carryovers;
+
+    if ((_allocation_requests_throttled > 0) || (_allocation_requests_failed > 0)) {
+      young_heuristics()->report_phase_has_throttled();
+    }
 
     if ((this_phase == ShenandoahThrottler::_idle) && (_phase_label != ShenandoahThrottler::_idle)) {
       double orig_evac_update_factor = throttler()->get_evacuate_vs_update_factor();
@@ -4360,17 +4367,17 @@ size_t ShenandoahHeap::wait_in_throttle(size_t time_ms) {
 
 void ShenandoahHeap::log_metrics_and_prep_for_next(double evac_update_factor, ShenandoahThrottler::GCPhase degen_point) {
   log_info(gc, ergo)("Throttle report (evac vs update factor: %.3f)", evac_update_factor);
-  log_info(gc, ergo)("%6s  %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %11s %11s %8s %8s %8s %8s %11s %11s %8s",
-                     "Phase", "Effort", "Progress", "Budget", "Alloted", "Alloced", "Avail", "GoodReqs", "Bytes", "Min", "Max",
-                     "MaxTime", "TotTime", "BadReqs", "Bytes", "Min", "Max", "MaxTime", "TotTime", "Overflow");
+  log_info(gc, ergo)("%6s  %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %11s %11s %8s %8s %8s %8s %11s %11s %8s",
+                     "Phase", "Workers", "Effort", "Progress", "Budget", "Alloted", "Alloced", "Avail", "GoodReqs", "Bytes",
+                     "Min", "Max", "MaxTime", "TotTime", "BadReqs", "Bytes", "Min", "Max", "MaxTime", "TotTime", "Overflow");
   for (int p = ShenandoahThrottler::_idle; p <= degen_point; p++) {
     size_t allocatable = (size_t) _log_allocatable_at_end[p];
-    log_info(gc, ergo)("%6s: " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
+    log_info(gc, ergo)("%6s: %8u " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
                        SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s "
                        SIZE_FORMAT_W(7) "%s "
                        SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8) " " SIZE_FORMAT_W(7) "%s " SIZE_FORMAT_W(7) "%s "
                        SIZE_FORMAT_W(7) "%s " "%11.6f %11.6f " SIZE_FORMAT_W(8),
-                       ShenandoahThrottler::phase_name((ShenandoahThrottler::GCPhase) p),
+                       ShenandoahThrottler::phase_name((ShenandoahThrottler::GCPhase) p), _log_workers[p],
                        FORMAT_WORDS(_log_effort[p]), FORMAT_WORDS(_log_progress[p]),
                        FORMAT_WORDS(_log_budget[p]), FORMAT_WORDS(_log_authorized[p]), FORMAT_WORDS(_log_allocated[p]),
                        FORMAT_WORDS(allocatable), _log_requests[p], FORMAT_WORDS(_log_words_throttled[p]),
@@ -4409,10 +4416,13 @@ void ShenandoahHeap::log_metrics_and_prep_for_next(double evac_update_factor, Sh
     _log_allocatable_at_end[p]   = 0;
     _log_carryovers[p]           = 0;
 
+    _log_workers[p]              = 0;
+
 #ifdef KELVIN_REPORT_GRANT_MEMORY
     _log_total_time_delayed[p]   = 0.0;
 #endif
   }
+  young_heuristics()->throttle_cycle_has_ended();
 
 #ifdef KELVIN_REPORT_GRANT_MEMORY
   if (_num_grant_memory_entries > 0) {
@@ -4479,4 +4489,8 @@ void ShenandoahHeap::unthrottle_for_alloc(ShenandoahThrottledAllocRequest* origi
     // Don't really expect this use case
     set_throttle_budget(get_throttle_budget() + excess_words);
   }
+}
+
+void ShenandoahHeap::report_throttle_workers(ShenandoahThrottler::GCPhase id, uint num_workers) {
+  _log_workers[id] = num_workers;
 }

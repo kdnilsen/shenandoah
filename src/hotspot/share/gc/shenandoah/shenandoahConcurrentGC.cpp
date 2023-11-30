@@ -411,18 +411,23 @@ void ShenandoahConcurrentGC::entry_reset() {
     ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_reset);
     EventMark em("%s", msg);
 
-    ShenandoahWorkerScope scope(heap->workers(),
-                                ShenandoahWorkerPolicy::calc_workers_for_conc_reset(),
-                                msg);
+    uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_reset();
+    ShenandoahWorkerScope scope(heap->workers(), num_workers, msg);
+    if (ShenandoahThrottleAllocations) {
+      heap->report_throttle_workers(ShenandoahThrottler::_reset, num_workers);
+    }
+
     op_reset();
   }
 
   if (_do_old_gc_bootstrap) {
     static const char* msg = "Concurrent reset (OLD)";
     ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_reset_old);
-    ShenandoahWorkerScope scope(ShenandoahHeap::heap()->workers(),
-                                ShenandoahWorkerPolicy::calc_workers_for_conc_reset(),
-                                msg);
+    uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_reset();
+    ShenandoahWorkerScope scope(ShenandoahHeap::heap()->workers(), num_workers, msg);
+    if (ShenandoahThrottleAllocations) {
+      heap->report_throttle_workers(ShenandoahThrottler::_reset, num_workers);
+    }
     EventMark em("%s", msg);
 
     heap->old_generation()->prepare_gc();
@@ -440,6 +445,7 @@ void ShenandoahConcurrentGC::entry_scan_remembered_set() {
     ShenandoahWorkerScope scope(heap->workers(),
                                 ShenandoahWorkerPolicy::calc_workers_for_rs_scanning(),
                                 msg);
+    //not a separate phase insofar as need to report throttle_workers
 
     heap->try_inject_alloc_failure();
     _generation->scan_remembered_set(true /* is_concurrent */);
@@ -453,9 +459,11 @@ void ShenandoahConcurrentGC::entry_mark_roots() {
   ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_mark_roots);
   EventMark em("%s", msg);
 
-  ShenandoahWorkerScope scope(heap->workers(),
-                              ShenandoahWorkerPolicy::calc_workers_for_conc_marking(),
-                              "concurrent marking roots");
+  uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_marking();
+  ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent marking roots");
+  if (ShenandoahThrottleAllocations) {
+    heap->report_throttle_workers(ShenandoahThrottler::_mark, num_workers);
+  }
 
   heap->try_inject_alloc_failure();
   op_mark_roots();
@@ -468,9 +476,9 @@ void ShenandoahConcurrentGC::entry_mark() {
   ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_mark);
   EventMark em("%s", msg);
 
-  ShenandoahWorkerScope scope(heap->workers(),
-                              ShenandoahWorkerPolicy::calc_workers_for_conc_marking(),
-                              "concurrent marking");
+  uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_marking();
+  ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent marking");
+  // already reported throttle_workers with entry_mark_roots
 
   heap->try_inject_alloc_failure();
   op_mark();
@@ -482,9 +490,9 @@ void ShenandoahConcurrentGC::entry_thread_roots() {
   ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_thread_roots);
   EventMark em("%s", msg);
 
-  ShenandoahWorkerScope scope(heap->workers(),
-                              ShenandoahWorkerPolicy::calc_workers_for_conc_root_processing(),
-                              msg);
+  uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_root_processing();
+  ShenandoahWorkerScope scope(heap->workers(), num_workers, msg);
+  // not a separate phase insofar as need to report throttle_workers
 
   heap->try_inject_alloc_failure();
   op_thread_roots();
@@ -496,9 +504,11 @@ void ShenandoahConcurrentGC::entry_weak_refs() {
   ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_weak_refs);
   EventMark em("%s", msg);
 
-  ShenandoahWorkerScope scope(heap->workers(),
-                              ShenandoahWorkerPolicy::calc_workers_for_conc_refs_processing(),
-                              "concurrent weak references");
+  uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_refs_processing();
+  ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent weak references");
+  if (ShenandoahThrottleAllocations) {
+    heap->report_throttle_workers(ShenandoahThrottler::_update, num_workers);
+  }
 
   heap->try_inject_alloc_failure();
   op_weak_refs();
@@ -514,6 +524,7 @@ void ShenandoahConcurrentGC::entry_weak_roots() {
   ShenandoahWorkerScope scope(heap->workers(),
                               ShenandoahWorkerPolicy::calc_workers_for_conc_root_processing(),
                               "concurrent weak root");
+  // not a separate phase insofar as need to report throttle_workers
 
   heap->try_inject_alloc_failure();
   op_weak_roots();
@@ -529,6 +540,7 @@ void ShenandoahConcurrentGC::entry_class_unloading() {
   ShenandoahWorkerScope scope(heap->workers(),
                               ShenandoahWorkerPolicy::calc_workers_for_conc_root_processing(),
                               "concurrent class unloading");
+  // not a separate phase insofar as need to report throttle_workers
 
   heap->try_inject_alloc_failure();
   op_class_unloading();
@@ -546,6 +558,7 @@ void ShenandoahConcurrentGC::entry_strong_roots() {
   ShenandoahWorkerScope scope(heap->workers(),
                               ShenandoahWorkerPolicy::calc_workers_for_conc_root_processing(),
                               "concurrent strong root");
+  // not a separate phase insofar as need to report throttle_workers
 
   heap->try_inject_alloc_failure();
   op_strong_roots();
@@ -571,9 +584,11 @@ void ShenandoahConcurrentGC::entry_evacuate() {
   ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_evac);
   EventMark em("%s", msg);
 
-  ShenandoahWorkerScope scope(heap->workers(),
-                              ShenandoahWorkerPolicy::calc_workers_for_conc_evac(),
-                              "concurrent evacuation");
+  uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_evac();
+  ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent evacuation");
+  if (ShenandoahThrottleAllocations) {
+    heap->report_throttle_workers(ShenandoahThrottler::_evac, num_workers);
+  }
 
   heap->try_inject_alloc_failure();
   op_evacuate();
@@ -602,6 +617,7 @@ void ShenandoahConcurrentGC::entry_updaterefs() {
   ShenandoahWorkerScope scope(heap->workers(),
                               ShenandoahWorkerPolicy::calc_workers_for_conc_update_ref(),
                               "concurrent reference update");
+  // already reported throttle_workers with entry_update_thread_roots
 
   heap->try_inject_alloc_failure();
   op_updaterefs();

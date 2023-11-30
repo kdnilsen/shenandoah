@@ -340,9 +340,11 @@ void ShenandoahPacer::print_cycle_on(outputStream* out) {
   out->cr();
 }
 
-// A value of 48 signifies that updating a region is 48 times easier than evacuating a region.  The value is
-// determined empirically.  If we are more likely to throttle during evac than update refs, increase this value.
-// If more likely to throttle during update refs than evacuate, decrease this number.  Note that evacauating has
+// A value of 48 signifies that updating a region is 48 times easier than evacuating a region, in proportion to the
+// size of the relevant data.  The relevant data for evacuation is the amount of live data within the region.  The
+// relevant data for evacuation is the also the live data within the region.  The value of the evacuate_vs_update_factor
+// is adjusted dynamically.  If we find ourselves more likely to throttle during evac than update refs, we increase the
+// value. If more likely to throttle during update refs than evacuate, decrease this number.  Note that evacauating has
 // to read every value and write every value.  Updating only has to read reference values (N % of total live memory)
 // and then it overwrites the same value in x% of cases (i.e. if the original value points to CSET).  Different workloads
 // will behave differently.

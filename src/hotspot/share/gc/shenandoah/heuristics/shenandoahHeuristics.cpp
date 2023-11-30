@@ -307,3 +307,17 @@ double ShenandoahHeuristics::elapsed_cycle_time() const {
 double ShenandoahHeuristics::elapsed_degenerated_cycle_time() const {
   return os::elapsedTime() - _precursor_cycle_start;
 }
+
+// Return 0 for no surge, 1: 25% surge, 2: 50% surge, 3: 75% surge, 4: 100% surge
+uint ShenandoahHeuristics::gc_surge_requested() {
+  return 0;
+}
+
+void ShenandoahHeuristics::report_phase_has_throttled() {
+  // Do nothing
+}
+
+void ShenandoahHeuristics::throttle_cycle_has_ended() {
+  // Do nothing
+}
+
