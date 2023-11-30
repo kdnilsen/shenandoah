@@ -3067,6 +3067,8 @@ void ShenandoahHeap::assert_gc_workers(uint nworkers) {
       // Use ParallelGCThreads inside safepoints
       assert(nworkers == ParallelGCThreads, "Use ParallelGCThreads within safepoints");
     }
+  } else if (ShenandoahThrottleAllocations) {
+    assert(nworkers <= ParallelGCThreads, "Cannot use more than it has");
   } else {
     if (UseDynamicNumberOfGCThreads) {
       assert(nworkers <= ConcGCThreads, "Cannot use more than it has");
