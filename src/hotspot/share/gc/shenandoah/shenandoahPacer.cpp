@@ -734,6 +734,11 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
 
   assert(_Microphase_Count == _16th_microphase + 1, "Otherwise, the initializations that follow are not correct.");
 
+  // Reset runs fast with minimal allocation.  We impose a budget to allow rare throttles during this phase to
+  // cause increased surge of worker threads during mark and subseqeunt phases.  Note that allocatable_words does
+  // not include what has been held in reserve for GC runway.
+  size_t phase_budget = (size_t) (allocatable_words / 4);
+
   // No work will be recorded, so it doesn't really matter what value we store here.
   _work_completed[_first_microphase]   = (size_t) 0x7fffffffL;
   _work_completed[_second_microphase]  = (size_t) 0x7fffffffL;
@@ -771,7 +776,7 @@ void ShenandoahThrottler::setup_for_reset(size_t allocatable_words) {
   _budget_supplement[_16th_microphase]    = (size_t) 0;
 
   Atomic::store(&_progress, (size_t) 0L);
-  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_reset, allocatable_words, allocatable_words, 0);
+  ShenandoahHeap::heap()->start_throttle_for_gc_phase(_reset, phase_budget, phase_budget, 0);
 }
 
 // The typical root cause for degeneration is excessive growth of live memory without awareness by the triggering
