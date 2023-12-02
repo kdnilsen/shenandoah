@@ -506,9 +506,7 @@ void ShenandoahConcurrentGC::entry_weak_refs() {
 
   uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_refs_processing();
   ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent weak references");
-  if (ShenandoahThrottleAllocations) {
-    heap->report_throttle_workers(ShenandoahThrottler::_update, num_workers);
-  }
+  // not a separate phase
 
   heap->try_inject_alloc_failure();
   op_weak_refs();
@@ -614,10 +612,12 @@ void ShenandoahConcurrentGC::entry_updaterefs() {
   ShenandoahConcurrentPhase gc_phase(msg, ShenandoahPhaseTimings::conc_update_refs);
   EventMark em("%s", msg);
 
-  ShenandoahWorkerScope scope(heap->workers(),
-                              ShenandoahWorkerPolicy::calc_workers_for_conc_update_ref(),
-                              "concurrent reference update");
-  // already reported throttle_workers with entry_update_thread_roots
+
+  uint num_workers = ShenandoahWorkerPolicy::calc_workers_for_conc_update_ref();
+  ShenandoahWorkerScope scope(heap->workers(), num_workers, "concurrent reference update");
+  if (ShenandoahThrottleAllocations) {
+    heap->report_throttle_workers(ShenandoahThrottler::_update, num_workers);
+  }
 
   heap->try_inject_alloc_failure();
   op_updaterefs();

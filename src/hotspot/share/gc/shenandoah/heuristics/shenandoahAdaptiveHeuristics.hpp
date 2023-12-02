@@ -86,7 +86,7 @@ public:
                                                      size_t actual_free);
 
   virtual uint gc_surge_requested();
-  virtual void report_phase_has_throttled();
+  virtual void report_phase_throttling(bool throttled);
   virtual void throttle_cycle_has_ended();
 
   virtual void adjust_penalty(intx step);
@@ -117,7 +117,9 @@ public:
   virtual bool is_diagnostic()   { return false; }
   virtual bool is_experimental() { return false; }
 
- private:
+  size_t essential_runway();
+
+private:
   // These are used to adjust the margin of error and the spike threshold
   // in response to GC cycle outcomes. These values are shared, but the
   // margin of error and spike threshold trend in opposite directions.
@@ -224,11 +226,15 @@ protected:
   size_t min_free_threshold();
 
   bool _phase_has_throttled;
+  bool _most_recent_phase_has_throttled;
   bool _previous_cycle_was_throttled;
   uint _surge_level;
   uint _previous_cycle_surge_level;
   double _accelerated_spike_overrun;
   double _accelerated_consumption_overrun;
+  double _planned_overrun_ratio;
+  double _spiked_overrun_ratio;
+  size_t _most_recent_runway;
   bool _min_threshold_trigger;
 };
 

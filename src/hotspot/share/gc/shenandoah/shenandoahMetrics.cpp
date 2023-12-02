@@ -27,6 +27,7 @@
 #include "gc/shenandoah/shenandoahHeap.inline.hpp"
 #include "gc/shenandoah/shenandoahHeapRegion.hpp"
 #include "gc/shenandoah/shenandoahFreeSet.hpp"
+#include "gc/shenandoah/heuristics/shenandoahAdaptiveHeuristics.hpp"
 
 ShenandoahMetricsSnapshot::ShenandoahMetricsSnapshot() {
   _heap = ShenandoahHeap::heap();
@@ -44,16 +45,26 @@ void ShenandoahMetricsSnapshot::snap_after() {
 }
 
 bool ShenandoahMetricsSnapshot::is_good_progress() {
-  // The critical threshold is described in terms of memory available within the heap.?
+  // The critical threshold is described in terms of memory available within the heap
   // This includes mutator_free + collector_reserve + old_collector_reserve
-  size_t free_actual =
-    _heap->free_set()->available() + _heap->free_set()->collector_free() + _heap->free_set()->old_collector_free();
-  size_t free_expected = _heap->max_capacity() / 100 * ShenandoahCriticalFreeThreshold;
-  bool prog_free = free_actual >= free_expected;
-  log_info(gc, ergo)("%s progress for free space: " SIZE_FORMAT "%s, need " SIZE_FORMAT "%s",
-                     prog_free ? "Good" : "Bad",
-                     byte_size_in_proper_unit(free_actual),   proper_unit_for_byte_size(free_actual),
-                     byte_size_in_proper_unit(free_expected), proper_unit_for_byte_size(free_expected));
+
+  bool prog_free;
+  size_t free_actual = _heap->free_set()->available();
+  if (ShenandoahThrottleAllocations) {
+    size_t planned_runway = ((ShenandoahAdaptiveHeuristics*) _heap->young_heuristics())->essential_runway();
+    prog_free = (planned_runway <= free_actual);
+    log_info(gc, ergo)("%s progress for free space: " SIZE_FORMAT "%s, need " SIZE_FORMAT "%s",
+                       prog_free ? "Good" : "Bad",
+                       byte_size_in_proper_unit(free_actual),   proper_unit_for_byte_size(free_actual),
+                       byte_size_in_proper_unit(planned_runway), proper_unit_for_byte_size(planned_runway));
+  } else {
+    size_t free_expected = _heap->max_capacity() / 100 * ShenandoahCriticalFreeThreshold;
+    prog_free = free_actual >= free_expected;
+    log_info(gc, ergo)("%s progress for free space: " SIZE_FORMAT "%s, need " SIZE_FORMAT "%s",
+                       prog_free ? "Good" : "Bad",
+                       byte_size_in_proper_unit(free_actual),   proper_unit_for_byte_size(free_actual),
+                       byte_size_in_proper_unit(free_expected), proper_unit_for_byte_size(free_expected));
+  }
   if (!prog_free) {
     return false;
   }

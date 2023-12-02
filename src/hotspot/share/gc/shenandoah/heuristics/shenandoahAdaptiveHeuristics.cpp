@@ -98,11 +98,15 @@ ShenandoahAdaptiveHeuristics::ShenandoahAdaptiveHeuristics(ShenandoahSpaceInfo* 
   _most_recent_headroom_at_start_of_idle(0),
   _acceleration_goodness_ratio(ShenandoahInitialAcceleratedAllocationRateGoodnessRatio),
   _phase_has_throttled(0),
+  _most_recent_phase_has_throttled(0),
   _previous_cycle_was_throttled(0),
   _surge_level(0),
   _previous_cycle_surge_level(0),
   _accelerated_spike_overrun(0.0),
   _accelerated_consumption_overrun(0.0),
+  _planned_overrun_ratio(0.0),
+  _spiked_overrun_ratio(0.0),
+  _most_recent_runway(0),
   _min_threshold_trigger(false) { }
 
 ShenandoahAdaptiveHeuristics::~ShenandoahAdaptiveHeuristics() {
@@ -360,7 +364,16 @@ static double saturate(double value, double min, double max) {
 
 #undef KELVIN_NEEDS_TO_SEE
 
+// How much memory will we need to allocate during concurrent GC, based on most recently available data,
+// assuming average allocation rate, average GC cycle time, no throttling, and no surge of GC worker threads?
+// Throttling and worker surge provide a safety mechanism in case our estimate was overly optimistic.
+size_t ShenandoahAdaptiveHeuristics::essential_runway() {
+  return _most_recent_runway;
+}
+
 void ShenandoahAdaptiveHeuristics::start_idle_span() {
+  assert(!strcmp(_space_info->name(), "YOUNG"), "Assumed young space, but got: %s", _space_info->name());
+
   size_t capacity = _space_info->soft_max_capacity();
   size_t total_allocations = _freeset->get_mutator_allocations();
   size_t spike_headroom = capacity / 100 * ShenandoahAllocSpikeFactor;
@@ -368,7 +381,6 @@ void ShenandoahAdaptiveHeuristics::start_idle_span() {
 
   // make headroom adjustments
   size_t headroom_adjustments = spike_headroom + penalties;
-
   size_t mutator_available = ShenandoahHeap::heap()->get_mutator_free_after_updaterefs();
 #undef KELVIN_VISIBLE
 #ifdef KELVIN_VISIBLE
@@ -380,8 +392,6 @@ void ShenandoahAdaptiveHeuristics::start_idle_span() {
   } else {
     mutator_available = 0;
   }
-
-  assert(!strcmp(_space_info->name(), "YOUNG"), "Assumed young space, but got: %s", _space_info->name());
   log_info(gc)("At start of idle gc span for %s, mutator available set to: " SIZE_FORMAT "%s"
                " after adjusting for spike_headroom: " SIZE_FORMAT "%s"
                " and penalties: " SIZE_FORMAT "%s", _space_info->name(),
@@ -536,49 +546,80 @@ void ShenandoahAdaptiveHeuristics::throttle_cycle_has_ended() {
   _previous_cycle_was_throttled = _phase_has_throttled;
   _previous_cycle_surge_level = _surge_level;;
   _phase_has_throttled = false;
+  _most_recent_phase_has_throttled = false;
   _surge_level = 0;
   _accelerated_spike_overrun = 0.0;
   _accelerated_consumption_overrun = 0.0;
+  _planned_overrun_ratio = 0.0;
+  _spiked_overrun_ratio = 0.0;
   _min_threshold_trigger = false;
 }
 
 // This is called by ShenandoahThrottler only if it detects throttling in the most recently executed microphase
-void ShenandoahAdaptiveHeuristics::report_phase_has_throttled() {
+void ShenandoahAdaptiveHeuristics::report_phase_throttling(bool throttled) {
   assert(ShenandoahThrottleAllocations, "Only called if throttling is enabled");
-  _phase_has_throttled = true;
+  _most_recent_phase_has_throttled = throttled;
+  _phase_has_throttled = _phase_has_throttled || throttled;
 }
 
 uint ShenandoahAdaptiveHeuristics::gc_surge_requested() {
   assert(ShenandoahThrottleAllocations, "Only called if throttling is enabled");
 
-  if (_phase_has_throttled) {
-    uint result;
-    if (_surge_level == 0) {
-      result = 2;
-    } else {
-      // Note that we'll increment thrice from reset to mark, because we query this function once for remembered set
-      // scanning, once again for concurrent marking roots, and a third time for concurrent marking
-      result = MIN2(_surge_level + 1, (uint) 4);
-    }
-    // e.g. if mark was surged and it still had throttles, then increase the surge.
-    //      Suppose mark was throttled without surge.  This causes us to surge evac, which may or may not experience additional
-    //      throttling.  As we prepare to begin update refs, we discover that both _phase_has_throttled and _surge_level > 0,
-    //      so we upgrade the surge request for update.  That's ok.  Given that we've been throttling in this phase, let's
-    //      invest in finishing the GC as soon as possible so that we can "catch up" and recover stability.
+  if (_most_recent_phase_has_throttled) {
+    // Note: we never decrease surge during a cycle
+    // If we throttle during this cycle, go aggressive on surge, especially if we were already in surge.
+    uint result = (_surge_level == 0)? 2: 4;
     _surge_level = MAX2(result, _surge_level);
-    return result;;
-  } else if (_accelerated_consumption_overrun > 2.0) {
-    // Surge in moderation.  We'll ratchet this up if the phase or cycle still throttles.
+    return result;
+  } else if (_surge_level > 0) {
+    // If we've already surged in this cycle, keep the surge until start of next cycle.
+    return _surge_level;
+  } else if ((_accelerated_consumption_overrun > 2.0) || (_planned_overrun_ratio > 2.0) || (_spiked_overrun_ratio > 2.0)) {
+    // Surge in moderation.  We'll ratchet this up if this phase still throttles.
     uint result = 2;
     _surge_level = MAX2(result, _surge_level);
     return result;
   } else if (_previous_cycle_was_throttled && _previous_cycle_surge_level > 0) {
+    // I did an experiment to test whether this code makes us too slow to backoff a surge.  I commented this
+    // else clause out so that we would decrease surge immediately to level 5 in the case that cycle was both throttled
+    // and surged.  The outcome was worse.  Bottom line: it is wise to keep the surge a bit longer if we still throttled
+    // under surge.
+    //
+    // With this code, I observed the following resuilts:
+    // 56G heap: CPP[100000]: P50(1054) P95(1331) P99(1497) P99.9(2034) P99.99(14874) P99.999(40406) P100(193_358)
+    // 36G heap: CPP[100000]: P50(1062) P95(1348) P99(1522) P99.9(2547) P99.99(23786) P99.999(290171) P100(1_420_968)
+    // 23G heap: CPP[100000]: P50(1067) P95(1364) P99(1697) P99.9(401265) P99.99(539203) P99.999(564426) P100(572784)
+    //
+    // When this code is disabled, I get:
+    // 56G heap: CPP[100000]: P50(1055) P95(1323) P99(1480) P99.9(2204) P99.99(56653) P99.999(74419) P100(366_350)
+    // 48G heap: CPP[100000]: P50(1056) P95(1327) P99(1487) P99.9(2447) P99.99(23440) P99.999(81136) P100(1_286_140)
+    // 23G heap: CPP[100000]: P50(1059) P95(381889) P99(27747209) P99.9(41093013) P99.99(52188556) P99.999(53186997) P100(54497067)
+    //
+    // Note: very slight improvement at the P50, but generally much worse at higher percentiles.
+
     uint result = (_previous_cycle_surge_level + 1) / 2;   // 4 becomes 2, 3 becomes 2, 2 becomes 1, 1 becomes 1
     _surge_level = MAX2(result, _surge_level);
     return result;
-  } else if (_previous_cycle_was_throttled || _min_threshold_trigger || (_accelerated_spike_overrun > 1.25) ||
-             (_accelerated_consumption_overrun > 1.15) || (_previous_cycle_surge_level > 2)) {
-    // Since _accelerated_spike_overrun is a noisy trigger, do not surge more than 1 for that.  This allows quicker recovery.
+  } else if (_previous_cycle_was_throttled || _min_threshold_trigger || (_accelerated_spike_overrun > 3.0) ||
+             (_planned_overrun_ratio > 1.5) || (_spiked_overrun_ratio > 1.5) ||
+             (_accelerated_consumption_overrun > 1.25)) {
+
+    // In a previous implementation of this code, I also set _surge_level to 1 if (_previous_cycle_surge_level > 2) &&
+    // !_previous_cycle_was_throttled.
+    //
+    // With this extra condition, I observed the following resuilts:
+    // 56G heap: CPP[100000]: P50(1054) P95(1331) P99(1497) P99.9(2034) P99.99(14874) P99.999(40_406) P100(193_358)
+    // 36G heap: CPP[100000]: P50(1062) P95(1348) P99(1522) P99.9(2547) P99.99(23786) P99.999(290_171) P100(1_420_968)
+    // 23G heap: CPP[100000]: P50(1067) P95(1364) P99(1697) P99.9(401265) P99.99(539203) P99.999(564_426) P100(572_784)
+    //
+    // When I eliminated this condition, I'm going to call these better results:
+    // 56G heap: CPP[100000]: P50(1059) P95(1335) P99(1509) P99.9(2278) P99.99(41842) P99.999(59_113) P100(72_872)
+    // 36G heap: CPP[100000]: P50(1060) P95(1345) P99(1510) P99.9(2495) P99.99(52857) P99.999(77_713) P100(3_472_881)
+    // 23G heap: CPP[100000]: P50(1049) P95(1338) P99(1550) P99.9(311779) P99.99(512971) P99.999(558_997) P100(1_343_151)
+    //
+    // Note: overall slight improvements at p50 - p99.999, overall degradation at p100.  I'm thinking p100 issue is to
+    // resolved by a different change.
+
     uint result = 1;
     _surge_level = MAX2(result, _surge_level);
     return result;
@@ -642,6 +683,8 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
     future_planned_gc_time_is_average = true;
   }
 
+  _most_recent_runway = planned_gc_time * avg_alloc_rate;
+
   _last_trigger = OTHER;
 
   double instantaneous_rate = allocated_since_last_sample / (now - _previous_allocation_timestamp);
@@ -657,6 +700,10 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
   } else {
     _accelerated_spike_overrun = consumption_accelerated / (double) allocatable;
   }
+
+  _planned_overrun_ratio = planned_gc_time / (allocatable / avg_alloc_rate);
+  bool is_spiking = _allocation_rate.is_spiking(rate, _spike_threshold_sd);
+  _spiked_overrun_ratio = (is_spiking)? (planned_gc_time / (allocatable / rate)): 0.0;
 
   size_t min_threshold = min_free_threshold();
   if (available < min_threshold) {
@@ -728,7 +775,6 @@ bool ShenandoahAdaptiveHeuristics::should_start_gc() {
     return true;
   }
 
-  bool is_spiking = _allocation_rate.is_spiking(rate, _spike_threshold_sd);
   if (is_spiking && planned_gc_time > allocatable / rate) {
     log_info(gc)("Trigger (%s): Planned %s GC time (%.2f ms) is above the time for instantaneous allocation rate (%.0f %sB/s)"
                  " to deplete free headroom (" SIZE_FORMAT "%s) (spike threshold = %.2f)",

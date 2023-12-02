@@ -3946,9 +3946,7 @@ void ShenandoahHeap::absorb_throttle_metrics_and_increment_epoch(size_t progress
 
     _log_carryovers[_phase_label]        += _phase_carryovers;
 
-    if ((_allocation_requests_throttled > 0) || (_allocation_requests_failed > 0)) {
-      young_heuristics()->report_phase_has_throttled();
-    }
+    young_heuristics()->report_phase_throttling(_allocation_requests_throttled + _allocation_requests_failed > 0);
 
     if ((this_phase == ShenandoahThrottler::_idle) && (_phase_label != ShenandoahThrottler::_idle)) {
       double orig_evac_update_factor = throttler()->get_evacuate_vs_update_factor();
