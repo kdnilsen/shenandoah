@@ -459,9 +459,6 @@ public:
   inline bool is_concurrent_weak_root_in_progress() const;
   bool is_prepare_for_old_mark_in_progress() const;
   inline bool is_aging_cycle() const;
-  inline bool upgraded_to_full() { return _upgraded_to_full; }
-  inline void start_conc_gc() { _upgraded_to_full = false; }
-  inline void record_upgrade_to_full() { _upgraded_to_full = true; }
 
   inline void clear_promotion_potential() { _promotion_potential = 0; };
   inline void set_promotion_potential(size_t val) { _promotion_potential = val; };

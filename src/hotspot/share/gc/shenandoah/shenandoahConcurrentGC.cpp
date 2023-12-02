@@ -104,7 +104,6 @@ ShenandoahGC::ShenandoahDegenPoint ShenandoahConcurrentGC::degen_point() const {
 
 bool ShenandoahConcurrentGC::collect(GCCause::Cause cause) {
   ShenandoahHeap* const heap = ShenandoahHeap::heap();
-  heap->start_conc_gc();
 
   ShenandoahBreakpointGCScope breakpoint_gc_scope(cause);
 
@@ -1392,9 +1391,9 @@ const char* ShenandoahConcurrentGC::init_mark_event_message() const {
   ShenandoahHeap* const heap = ShenandoahHeap::heap();
   assert(!heap->has_forwarded_objects(), "Should not have forwarded objects here");
   if (heap->unload_classes()) {
-    SHENANDOAH_RETURN_EVENT_MESSAGE(heap, _generation->type(), "Pause Init Mark", " (unload classes)");
+    SHENANDOAH_RETURN_EVENT_MESSAGE(_generation->type(), "Pause Init Mark", " (unload classes)");
   } else {
-    SHENANDOAH_RETURN_EVENT_MESSAGE(heap, _generation->type(), "Pause Init Mark", "");
+    SHENANDOAH_RETURN_EVENT_MESSAGE(_generation->type(), "Pause Init Mark", "");
   }
 }
 
@@ -1404,9 +1403,9 @@ const char* ShenandoahConcurrentGC::final_mark_event_message() const {
          "Should not have forwarded objects during final mark, unless old gen concurrent mark is running");
 
   if (heap->unload_classes()) {
-    SHENANDOAH_RETURN_EVENT_MESSAGE(heap, _generation->type(), "Pause Final Mark", " (unload classes)");
+    SHENANDOAH_RETURN_EVENT_MESSAGE(_generation->type(), "Pause Final Mark", " (unload classes)");
   } else {
-    SHENANDOAH_RETURN_EVENT_MESSAGE(heap, _generation->type(), "Pause Final Mark", "");
+    SHENANDOAH_RETURN_EVENT_MESSAGE(_generation->type(), "Pause Final Mark", "");
   }
 }
 
@@ -1415,8 +1414,8 @@ const char* ShenandoahConcurrentGC::conc_mark_event_message() const {
   assert(!heap->has_forwarded_objects() || heap->is_concurrent_old_mark_in_progress(),
          "Should not have forwarded objects concurrent mark, unless old gen concurrent mark is running");
   if (heap->unload_classes()) {
-    SHENANDOAH_RETURN_EVENT_MESSAGE(heap, _generation->type(), "Concurrent marking", " (unload classes)");
+    SHENANDOAH_RETURN_EVENT_MESSAGE(_generation->type(), "Concurrent marking", " (unload classes)");
   } else {
-    SHENANDOAH_RETURN_EVENT_MESSAGE(heap, _generation->type(), "Concurrent marking", "");
+    SHENANDOAH_RETURN_EVENT_MESSAGE(_generation->type(), "Concurrent marking", "");
   }
 }
