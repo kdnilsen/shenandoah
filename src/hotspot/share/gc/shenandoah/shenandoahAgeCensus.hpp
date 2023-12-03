@@ -95,6 +95,7 @@ struct ShenandoahNoiseStats {
 // once the per-worker data is consolidated into the appropriate population vector
 // per minor collection. The _local_age_table is thus C x N, for N GC workers.
 class ShenandoahAgeCensus: public CHeapObj<mtGC> {
+  double* _census_timestamps;        // Time at which each census was taken
   AgeTable** _global_age_table;      // Global age table used for adapting tenuring threshold, one per snapshot
   AgeTable** _local_age_table;       // Local scratch age tables to track object ages, one per worker
 

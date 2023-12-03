@@ -619,6 +619,18 @@ uint ShenandoahAdaptiveHeuristics::gc_surge_requested() {
     //
     // Note: overall slight improvements at p50 - p99.999, overall degradation at p100.  I'm thinking p100 issue is to
     // resolved by a different change.
+    //
+    // Further, when I merge on 12/2 with shenandoah/master:
+    // 56G heap: CPP[100000]: P50(1071) P95(1361) P99(1530) P99.9(2510) P99.99(28050) P99.999(42_983) P100(353_122)
+    // 48G heap: CPP[100000]: P50(1059) P95(1333) P99(1498) P99.9(2215) P99.99(8162) P99.999(77_071) P100(419_363)
+    // 23G heap: CPP[100000]: P50(1037) P95(1319) P99(1527) P99.9(288986) P99.99(486158) P99.999(518_966) P100(788_665)
+    //
+    // I'll call this improvement.  But I also want to to try with -XX:shenandoahGenerationalMinTenuringAge=2:
+    // 56G heap: CPP[100000]: P50(1056) P95(1351) P99(1518) P99.9(2081) P99.99(6966) P99.999(17_579) P100(432_709)
+    // 36G heap: CPP[100000]: P50(1077) P95(1359) P99(1555) P99.9(113248) P99.99(381580) P99.999(415_277) P100(419_151)
+    // 23G heap: CPP[100000]: P50(1041) P95(1320) P99(1533) P99.9(374702) P99.99(512522) P99.999(545_233) P100(1_025_145)
+    //
+    // What about MinTenuringAge=4?
 
     uint result = 1;
     _surge_level = MAX2(result, _surge_level);

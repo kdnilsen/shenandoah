@@ -37,6 +37,7 @@ ShenandoahAgeCensus::ShenandoahAgeCensus() {
               ShenandoahGenerationalMinTenuringAge, ShenandoahGenerationalMaxTenuringAge));
   }
 
+  _census_timestamps = NEW_C_HEAP_ARRAY(double, MAX_SNAPSHOTS, mtGC);
   _global_age_table = NEW_C_HEAP_ARRAY(AgeTable*, MAX_SNAPSHOTS, mtGC);
   CENSUS_NOISE(_global_noise = NEW_C_HEAP_ARRAY(ShenandoahNoiseStats, MAX_SNAPSHOTS, mtGC);)
   _tenuring_threshold = NEW_C_HEAP_ARRAY(uint, MAX_SNAPSHOTS, mtGC);
@@ -47,6 +48,7 @@ ShenandoahAgeCensus::ShenandoahAgeCensus() {
     CENSUS_NOISE(_global_noise[i].clear();)
     // Sentinel value
     _tenuring_threshold[i] = MAX_COHORTS;
+    _census_timestamps[i] = 0.0;
   }
   if (ShenandoahGenerationalAdaptiveTenuring && !ShenandoahGenerationalCensusAtEvac) {
     size_t max_workers = ShenandoahHeap::heap()->max_workers();
@@ -153,6 +155,7 @@ void ShenandoahAgeCensus::update_census(size_t age0_pop, AgeTable* pv1, AgeTable
     _global_age_table[_epoch]->merge(pv1);
     _global_age_table[_epoch]->merge(pv2);
   }
+  _census_timestamps[_epoch] = os::elapsedTime();
 
   update_tenuring_threshold();
 }
@@ -164,6 +167,7 @@ void ShenandoahAgeCensus::reset_global() {
   assert(_epoch < MAX_SNAPSHOTS, "Out of bounds");
   for (uint i = 0; i < MAX_SNAPSHOTS; i++) {
     _global_age_table[i]->clear();
+    _census_timestamps[i] = 0.0;
     CENSUS_NOISE(_global_noise[i].clear();)
   }
   _epoch = MAX_SNAPSHOTS;
@@ -261,7 +265,27 @@ uint ShenandoahAgeCensus::compute_tenuring_threshold() {
   }
   upper_bound = MIN2(upper_bound, markWord::max_age);
 
-  const uint lower_bound = MAX2((uint)ShenandoahGenerationalMinTenuringAge, (uint)1);
+  uint lower_bound = MAX2((uint)ShenandoahGenerationalMinTenuringAge, (uint)1);
+  if (ShenandoahGenerationalMinTenuringTimeMillis > 0) {
+    uint timestamp_epoch = cur_epoch;
+    double now = _census_timestamps[timestamp_epoch];
+    uint new_lower_bound = lower_bound;
+    for (uint i = upper_bound; i >= lower_bound; i--) {
+      double time_of_census = _census_timestamps[timestamp_epoch];
+      size_t delta_millis = (size_t) ((now - time_of_census) * 1000);
+      // Objects of age (1 + upper_bound - i) are at least delta_millis old
+      if (delta_millis < ShenandoahGenerationalMinTenuringTimeMillis) {
+        // Disqualify lower bound (1 + upper_bound - i) because delta_millis < minimum tenuring time
+        new_lower_bound = 2 + upper_bound - i;
+      }
+      if (timestamp_epoch > 0) {
+        timestamp_epoch--;
+      } else {
+        timestamp_epoch = markWord::max_age;
+      }
+    }
+    lower_bound = new_lower_bound;
+  }
 
   uint tenuring_threshold = upper_bound;
   for (uint i = upper_bound; i >= lower_bound; i--) {

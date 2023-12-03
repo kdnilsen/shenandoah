@@ -126,6 +126,11 @@
           "(Generational mode only) Ignore mortality rates older than the " \
           "oldest cohort under the tenuring age for the last cycle." )      \
                                                                             \
+  product(uintx, ShenandoahGenerationalMinTenuringTimeMillis, 0,            \
+                                                              EXPERIMENTAL, \
+          "How many milliseconds must pass before considering objects "     \
+          "are eligible to be tenured?")                                    \
+                                                                            \
   product(uintx, ShenandoahGenerationalMinTenuringAge, 1, EXPERIMENTAL,     \
           "(Generational mode only) Floor for adaptive tenuring age. "      \
           "Setting floor and ceiling to the same value fixes the tenuring " \
