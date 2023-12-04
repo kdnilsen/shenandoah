@@ -51,12 +51,23 @@ bool ShenandoahMetricsSnapshot::is_good_progress() {
   bool prog_free;
   size_t free_actual = _heap->free_set()->available();
   if (ShenandoahThrottleAllocations) {
+#ifdef KELVIN_WANTS_THIS
+    // this causes several regressions in jtreg.  It requires too much memory to be available following
+    // remediation, resulting in out-of-memory being signalled too quickly.  Would that be a good thing?
     size_t planned_runway = ((ShenandoahAdaptiveHeuristics*) _heap->young_heuristics())->essential_runway();
     prog_free = (planned_runway <= free_actual);
     log_info(gc, ergo)("%s progress for free space: " SIZE_FORMAT "%s, need " SIZE_FORMAT "%s",
                        prog_free ? "Good" : "Bad",
                        byte_size_in_proper_unit(free_actual),   proper_unit_for_byte_size(free_actual),
                        byte_size_in_proper_unit(planned_runway), proper_unit_for_byte_size(planned_runway));
+#else
+    size_t free_expected = _heap->max_capacity() / 100 * ShenandoahCriticalFreeThreshold;
+    prog_free = free_actual >= free_expected;
+    log_info(gc, ergo)("%s progress for free space: " SIZE_FORMAT "%s, need " SIZE_FORMAT "%s",
+                       prog_free ? "Good" : "Bad",
+                       byte_size_in_proper_unit(free_actual),   proper_unit_for_byte_size(free_actual),
+                       byte_size_in_proper_unit(free_expected), proper_unit_for_byte_size(free_expected));
+#endif
   } else {
     size_t free_expected = _heap->max_capacity() / 100 * ShenandoahCriticalFreeThreshold;
     prog_free = free_actual >= free_expected;
