@@ -1408,8 +1408,6 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req, bool is_p
 }
 
 HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req, bool& in_new_region, bool is_promotion) {
-  bool try_smaller_lab_size = false;
-  size_t smaller_lab_size;
   {
     // promotion_eligible pertains only to PLAB allocations, denoting that the PLAB is allowed to allocate for promotions.
     bool promotion_eligible = false;
@@ -1421,6 +1419,7 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
     Thread* thread = Thread::current();
 
     if (mode()->is_generational()) {
+#ifdef KELVIN_DEPRECATE
       if (req.affiliation() == YOUNG_GENERATION) {
         if (req.is_mutator_alloc()) {
           size_t young_words_available = young_generation()->available() / HeapWordSize;
@@ -1438,6 +1437,8 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
           }
         }
       } else {                    // reg.affiliation() == OLD_GENERATION
+#endif
+      if (req.affiliation() == OLD_GENERATION) {
         assert(req.type() != ShenandoahAllocRequest::_alloc_gclab, "GCLAB pertains only to young-gen memory");
         if (req.type() ==  ShenandoahAllocRequest::_alloc_plab) {
           plab_alloc = true;
@@ -1541,54 +1542,8 @@ HeapWord* ShenandoahHeap::allocate_memory_under_lock(ShenandoahAllocRequest& req
         ShenandoahThreadLocalData::set_plab_preallocated_promoted(thread, 0);
       }
     }
-    if ((result != nullptr) || !try_smaller_lab_size) {
-      return result;
-    }
-    // else, fall through to try_smaller_lab_size
+    return result;
   } // This closes the block that holds the heap lock, releasing the lock.
-
-  // We failed to allocate the originally requested lab size.  Let's see if we can allocate a smaller lab size.
-  if (req.size() == smaller_lab_size) {
-    // If we were already trying to allocate min size, no value in attempting to repeat the same.  End the recursion.
-    return nullptr;
-  }
-
-  // We arrive here if the tlab allocation request can be resized to fit within young_available
-  assert((req.affiliation() == YOUNG_GENERATION) && req.is_lab_alloc() && req.is_mutator_alloc() &&
-         (smaller_lab_size < req.size()), "Only shrink allocation request size for TLAB allocations");
-
-  // By convention, ShenandoahAllocationRequest is primarily read-only.  The only mutable instance data is represented by
-  // actual_size(), which is overwritten with the size of the allocaion when the allocation request is satisfied.  We use a
-  // recursive call here rather than introducing new methods to mutate the existing ShenandoahAllocationRequest argument.
-  // Mutation of the existing object might result in astonishing results if calling contexts assume the content of immutable
-  // fields remain constant.  The original TLAB allocation request was for memory that exceeded the current capacity.  We'll
-  // attempt to allocate a smaller TLAB.  If this is successful, we'll update actual_size() of our incoming
-  // ShenandoahAllocRequest.  If the recursive request fails, we'll simply return nullptr.
-
-  // Note that we've relinquished the HeapLock and some other thread may perform additional allocation before our recursive
-  // call reacquires the lock.  If that happens, we will need another recursive call to further reduce the size of our request
-  // for each time another thread allocates young memory during the brief intervals that the heap lock is available to
-  // interfering threads.  We expect this interference to be rare.  The recursion bottoms out when young_available is
-  // smaller than req.min_size().  The inner-nested call to allocate_memory_under_lock() uses the same min_size() value
-  // as this call, but it uses a preferred size() that is smaller than our preferred size, and is no larger than what we most
-  // recently saw as the memory currently available within the young generation.
-
-  // TODO: At the expense of code clarity, we could rewrite this recursive solution to use iteration.  We need at most one
-  // extra instance of the ShenandoahAllocRequest, which we can re-initialize multiple times inside a loop, with one iteration
-  // of the loop required for each time the existing solution would recurse.  An iterative solution would be more efficient
-  // in CPU time and stack memory utilization.  The expectation is that it is very rare that we would recurse more than once
-  // so making this change is not currently seen as a high priority.
-
-  ShenandoahAllocRequest smaller_req = ShenandoahAllocRequest::for_tlab(req.min_size(), smaller_lab_size);
-
-  // Note that shrinking the preferred size gets us past the gatekeeper that checks whether there's available memory to
-  // satisfy the allocation request.  The reality is the actual TLAB size is likely to be even smaller, because it will
-  // depend on how much memory is available within mutator regions that are not yet fully used.
-  HeapWord* result = allocate_memory_under_lock(smaller_req, in_new_region, is_promotion);
-  if (result != nullptr) {
-    req.set_actual_size(smaller_req.actual_size());
-  }
-  return result;
 }
 
 HeapWord* ShenandoahHeap::mem_allocate(size_t size,
