@@ -66,6 +66,12 @@ ShenandoahMark::ShenandoahMark(ShenandoahGeneration* generation) :
 
 template <ShenandoahGenerationType GENERATION, bool CANCELLABLE, StringDedupMode STRING_DEDUP>
 void ShenandoahMark::mark_loop_prework(uint w, TaskTerminator *t, ShenandoahReferenceProcessor *rp, StringDedup::Requests* const req, bool update_refs) {
+#ifdef ASSERT
+  Thread* current = Thread::current();
+  assert (current->is_VM_thread() || ShenandoahSafepoint::is_at_shenandoah_safepoint() ||
+          ShenandoahThreadLocalData::thread_is_marked_as_suspendible(current),
+          "Thread must be suspendible");
+#endif
   ShenandoahObjToScanQueue* q = get_queue(w);
   ShenandoahObjToScanQueue* old_q = get_old_queue(w);
 

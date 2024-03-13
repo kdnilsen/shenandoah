@@ -66,6 +66,10 @@ private:
   bool   _plab_allows_promotion; // If false, no more promotion by this thread during this evacuation phase.
   bool   _plab_retries_enabled;
 
+#ifdef ASSERT
+  bool   _is_suspendible_thread;
+#endif
+
   ShenandoahEvacuationStats* _evacuation_stats;
 
   ShenandoahThreadLocalData();
@@ -258,6 +262,21 @@ public:
     return level;
   }
 
+#ifdef ASSERT
+  static void mark_thread_as_suspendible(Thread* thread) {
+    data(thread)->_is_suspendible_thread = true;
+  }
+
+  static void mark_thread_as_not_suspendible(Thread* thread) {
+    data(thread)->_is_suspendible_thread = true;
+  }
+
+  static bool thread_is_marked_as_suspendible(Thread* thread) {
+    return data(thread)->_is_suspendible_thread;
+  }
+#endif
+
+
   static bool is_evac_allowed(Thread* thread) {
     return evac_oom_scope_level(thread) > 0;
   }
@@ -278,6 +297,7 @@ public:
   static ByteSize gc_state_offset() {
     return Thread::gc_data_offset() + byte_offset_of(ShenandoahThreadLocalData, _gc_state);
   }
+
 };
 
 STATIC_ASSERT(sizeof(ShenandoahThreadLocalData) <= sizeof(GCThreadLocalData));
