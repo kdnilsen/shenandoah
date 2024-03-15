@@ -45,7 +45,6 @@
 #include "gc/shenandoah/shenandoahMarkingContext.inline.hpp"
 #include "gc/shenandoah/shenandoahScanRemembered.inline.hpp"
 #include "gc/shenandoah/shenandoahThreadLocalData.hpp"
-#include "gc/shenandoah/shenandoahScanRemembered.inline.hpp"
 #include "gc/shenandoah/mode/shenandoahMode.hpp"
 #include "oops/compressedOops.inline.hpp"
 #include "oops/oop.inline.hpp"

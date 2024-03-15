@@ -30,6 +30,13 @@
 
 markWord markWord::displaced_mark_helper() const {
   assert(has_displaced_mark_helper(), "check");
+#ifdef ASSERT
+  extern bool validate_shenandoah_displaced_mark_helper(Thread* t);
+  Thread* current = Thread::current();
+  assert (!UseShenandoahGC || validate_shenandoah_displaced_mark_helper(current),
+
+          "ShenandoahGC Worker Thread must be suspendible");
+#endif
   if (has_monitor()) {
     // Has an inflated monitor. Must be checked before has_locker().
     ObjectMonitor* monitor = this->monitor();

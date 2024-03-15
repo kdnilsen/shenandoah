@@ -268,7 +268,7 @@ public:
   }
 
   static void mark_thread_as_not_suspendible(Thread* thread) {
-    data(thread)->_is_suspendible_thread = true;
+    data(thread)->_is_suspendible_thread = false;
   }
 
   static bool thread_is_marked_as_suspendible(Thread* thread) {
