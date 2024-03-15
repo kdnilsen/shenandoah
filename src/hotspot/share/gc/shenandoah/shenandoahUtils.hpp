@@ -240,11 +240,17 @@ public:
 class ShenandoahSuspendibleThreadSetLeaver {
 private:
   SuspendibleThreadSetLeaver _leaver;
+#ifdef ASSERT
+  bool _was_in_suspendible_thread_set;
+#endif
 public:
   ShenandoahSuspendibleThreadSetLeaver(bool active = true) : _leaver(active) {
     assert(!ShenandoahThreadLocalData::is_evac_allowed(Thread::current()), "STS should be left after evac scope");
 #ifdef ASSERT
-    assert(ShenandoahThreadLocalData::thread_is_marked_as_suspendible(Thread::current()), "Should be STS when leaving STS");
+    Thread* current = Thread::current();
+    assert(!current->is_VM_thread() || ShenandoahThreadLocalData::thread_is_marked_as_suspendible(current),
+           "Should be STS when leaving STS");
+    _was_in_suspendible_thread_set = ShenandoahThreadLocalData::thread_is_marked_as_suspendible(current);
     ShenandoahThreadLocalData::mark_thread_as_not_suspendible(Thread::current());
 #endif
   }
@@ -252,7 +258,9 @@ public:
 #ifdef ASSERT
     assert(!ShenandoahThreadLocalData::thread_is_marked_as_suspendible(Thread::current()),
            "Should not be STS when returning from leave");
-    ShenandoahThreadLocalData::mark_thread_as_suspendible(Thread::current());
+    if (_was_in_suspendible_thread_set) {
+      ShenandoahThreadLocalData::mark_thread_as_suspendible(Thread::current());
+    }
 #endif
     assert(!ShenandoahThreadLocalData::is_evac_allowed(Thread::current()), "STS should be joined before evac scope");
   }
