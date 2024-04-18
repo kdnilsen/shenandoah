@@ -272,22 +272,29 @@ ShenandoahCardCluster<RememberedSet>::get_last_start(size_t card_index) const {
 // that straddles into this card. If this card is co-initial with an object, then
 // this would return the first address of the range that this card covers, which is
 // where the card's first object also begins.
+//
+// Requires that the card is dirty and that at least one object has been allocated
+// within this card or some other card to the right of this card within the same
+// ShenandoahHeapRegion.
+//
 // TODO: collect some stats for the size of walks backward over cards.
 // For larger objects, a logarithmic BOT such as used by G1 might make the
 // backwards walk potentially faster.
 template<typename RememberedSet>
 HeapWord*
 ShenandoahCardCluster<RememberedSet>::block_start(const size_t card_index) const {
-
   HeapWord* left = _rs->addr_for_card_index(card_index);
 
 #ifdef ASSERT
   assert(ShenandoahHeap::heap()->mode()->is_generational(), "Do not use in non-generational mode");
   ShenandoahHeapRegion* region = ShenandoahHeap::heap()->heap_region_containing(left);
   assert(region->is_old(), "Do not use for young regions");
-  // For HumongousRegion:s it's more efficient to jump directly to the
-  // start region.
+  // For HumongousRegions it's more efficient to jump directly to the start region.
   assert(!region->is_humongous(), "Use region->humongous_start_region() instead");
+
+  // We only ask for block_start() if the card[card_index] is dirty
+  assert(_rs->is_card_dirty(card_index), "Only ask block_start() if card is dirty");
+  assert(region->top() > left, "Dirty card must have allocated objects");
 #endif
   if (starts_object(card_index) && get_first_start(card_index) == 0) {
     // This card contains a co-initial object; a fortiori, it covers
@@ -315,7 +322,13 @@ ShenandoahCardCluster<RememberedSet>::block_start(const size_t card_index) const
   // can avoid call via card size arithmetic below instead
   p = _rs->addr_for_card_index(cur_index) + offset;
   // Recall that we already dealt with the co-initial object case above
-  assert(p < left, "obj should start before left");
+  obj = cast_to_oop(p);
+#ifdef KELVIN_TBD_IS_THIS_NEEDED
+  // In the case that no object has been allocated in his card, we may not have dealt with co-initial object case above.
+  if (p + obj->size() == left) {
+    return left;
+  }
+#endif
   // While it is safe to ask an object its size in the loop that
   // follows, the (ifdef'd out) loop should never be needed.
   // 1. we ask this question only for regions in the old generation
@@ -330,14 +343,15 @@ ShenandoahCardCluster<RememberedSet>::block_start(const size_t card_index) const
   //    evacuation phase) of young collections. This is never called
   //    during old or global collections.
   // 4. Every allocation under TAMS updates the object start array.
-  NOT_PRODUCT(obj = cast_to_oop(p);)
   assert(oopDesc::is_oop(obj), "Should be an object");
 #define WALK_FORWARD_IN_BLOCK_START false
   while (WALK_FORWARD_IN_BLOCK_START && p + obj->size() < left) {
     p += obj->size();
+    obj = cast_to_oop(p);
   }
 #undef WALK_FORWARD_IN_BLOCK_START // false
-  assert(p + obj->size() > left, "obj should end after left");
+  assert(p + obj->size() > left, "obj @ " PTR_FORMAT " of size: " SIZE_FORMAT " should end (" PTR_FORMAT
+         ") after left (" PTR_FORMAT ")", p2i(p), obj->size(), p2i(p + obj->size()), p2i(left));
   return p;
 }
 
