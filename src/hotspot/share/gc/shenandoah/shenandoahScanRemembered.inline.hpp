@@ -293,7 +293,8 @@ ShenandoahCardCluster<RememberedSet>::block_start(const size_t card_index) const
   assert(!region->is_humongous(), "Use region->humongous_start_region() instead");
 
   // We only ask for block_start() if the card[card_index] is dirty
-  assert(_rs->is_card_dirty(card_index), "Only ask block_start() if card is dirty");
+  assert(_rs->is_card_dirty(card_index) || _rs->is_write_card_dirty(card_index),
+         "Only ask block_start() if card is dirty");
   assert(region->top() > left, "Dirty card must have allocated objects");
 #endif
   if (starts_object(card_index) && get_first_start(card_index) == 0) {
