@@ -1567,7 +1567,7 @@ void ShenandoahFreeSet::compute_young_and_old_reserves(size_t young_cset_regions
   const size_t region_size_bytes = ShenandoahHeapRegion::region_size_bytes();
 
   ShenandoahOldGeneration* const old_generation = _heap->old_generation();
-  size_t old_available = old_generation->available();
+  size_t old_available = old_generation->available() + old_cset_regions * region_size_bytes;
   size_t old_unaffiliated_regions = old_generation->free_unaffiliated_regions();
   ShenandoahYoungGeneration* const young_generation = _heap->young_generation();
   size_t young_capacity = young_generation->max_capacity();
@@ -1576,6 +1576,16 @@ void ShenandoahFreeSet::compute_young_and_old_reserves(size_t young_cset_regions
   // Add in the regions we anticipate to be freed by evacuation of the collection set
   old_unaffiliated_regions += old_cset_regions;
   young_unaffiliated_regions += young_cset_regions;
+
+  assert(young_capacity >= (young_generation->used() + young_generation->get_humongous_waste()),
+         "Young capacity (" SIZE_FORMAT ") must exceed used (" SIZE_FORMAT ") plus humongous waste (" SIZE_FORMAT ")",
+         young_capacity, young_generation->used(), young_generation->get_humongous_waste());
+
+  size_t young_available = young_capacity - (young_generation->used() + young_generation->get_humongous_waste());
+  young_available += young_cset_regions * region_size_bytes;
+
+  assert(young_available >= young_unaffiliated_regions * region_size_bytes, "sanity");
+  assert(old_available >= old_unaffiliated_regions * region_size_bytes, "sanity");
 
   // Consult old-region balance to make adjustments to current generation capacities and availability.
   // The generation region transfers take place after we rebuild.
@@ -1592,6 +1602,7 @@ void ShenandoahFreeSet::compute_young_and_old_reserves(size_t young_cset_regions
     ssize_t xfer_bytes = old_region_balance * checked_cast<ssize_t>(region_size_bytes);
     old_available -= xfer_bytes;
     old_unaffiliated_regions -= old_region_balance;
+    young_available += xfer_bytes;
     young_capacity += xfer_bytes;
     young_unaffiliated_regions += old_region_balance;
   }
@@ -1623,9 +1634,9 @@ void ShenandoahFreeSet::compute_young_and_old_reserves(size_t young_cset_regions
   // the reserve downward to account for this possibility. This loss is part of the reason why the original budget
   // was adjusted with ShenandoahOldEvacWaste and ShenandoahOldPromoWaste multipliers.
   if (old_reserve_result >
-      _partitions.capacity_of(ShenandoahFreeSetPartitionId::OldCollector) + old_unaffiliated_regions * region_size_bytes) {
+      _partitions.available_in(ShenandoahFreeSetPartitionId::OldCollector) + old_unaffiliated_regions * region_size_bytes) {
     old_reserve_result =
-      _partitions.capacity_of(ShenandoahFreeSetPartitionId::OldCollector) + old_unaffiliated_regions * region_size_bytes;
+      _partitions.available_in(ShenandoahFreeSetPartitionId::OldCollector) + old_unaffiliated_regions * region_size_bytes;
   }
 
   if (young_reserve_result > young_unaffiliated_regions * region_size_bytes) {
