@@ -1577,9 +1577,12 @@ void ShenandoahFreeSet::compute_young_and_old_reserves(size_t young_cset_regions
   old_unaffiliated_regions += old_cset_regions;
   young_unaffiliated_regions += young_cset_regions;
 
-  assert(young_capacity >= (young_generation->used() + young_generation->get_humongous_waste()),
-         "Young capacity (" SIZE_FORMAT ") must exceed used (" SIZE_FORMAT ") plus humongous waste (" SIZE_FORMAT ")",
-         young_capacity, young_generation->used(), young_generation->get_humongous_waste());
+  assert(young_capacity >=
+         (young_generation->used() + young_generation->get_humongous_waste() - young_cset_regions * region_size_bytes),
+         "Young capacity (" SIZE_FORMAT ") must exceed used (" SIZE_FORMAT ") plus humongous waste (" SIZE_FORMAT
+         ") minus anticipated reclamation of garbage (" SIZE_FORMAT ")",
+         young_capacity, young_generation->used(), young_generation->get_humongous_waste(),
+         young_cset_regions * region_size_bytes);
 
   size_t young_available = young_capacity - (young_generation->used() + young_generation->get_humongous_waste());
   young_available += young_cset_regions * region_size_bytes;
