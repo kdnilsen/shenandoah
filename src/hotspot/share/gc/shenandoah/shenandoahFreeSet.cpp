@@ -1532,8 +1532,20 @@ void ShenandoahFreeSet::establish_generation_sizes(size_t young_region_count, si
     ShenandoahYoungGeneration* young_gen = heap->young_generation();
     size_t region_size_bytes = ShenandoahHeapRegion::region_size_bytes();
 
+    size_t original_old_regions = old_gen->max_capacity() / region_size_bytes;
     old_gen->set_capacity(old_region_count * region_size_bytes);
     young_gen->set_capacity(young_region_count * region_size_bytes);
+
+    if (original_old_regions > old_region_count) {
+      log_info(gc)("Transfer " SIZE_FORMAT " regions from OLD to YOUNG during rebuild of freeset",
+                   original_old_regions - old_region_count);
+    } else if (original_old_regions < old_region_count) {
+      log_info(gc)("Transfer " SIZE_FORMAT " regions from YOUNG to OLD during rebuild of freeset",
+                   old_region_count - original_old_regions);
+    }
+
+    // Having transferred regions based on results of rebuild(), reset the rebalance request.
+    old_gen->set_region_balance(0);
   }
 }
 
@@ -1577,12 +1589,9 @@ void ShenandoahFreeSet::compute_young_and_old_reserves(size_t young_cset_regions
   old_unaffiliated_regions += old_cset_regions;
   young_unaffiliated_regions += young_cset_regions;
 
-  assert(young_capacity >=
-         (young_generation->used() + young_generation->get_humongous_waste() - young_cset_regions * region_size_bytes),
-         "Young capacity (" SIZE_FORMAT ") must exceed used (" SIZE_FORMAT ") plus humongous waste (" SIZE_FORMAT
-         ") minus anticipated reclamation of garbage (" SIZE_FORMAT ")",
-         young_capacity, young_generation->used(), young_generation->get_humongous_waste(),
-         young_cset_regions * region_size_bytes);
+  assert(young_capacity >= (young_generation->used() + young_generation->get_humongous_waste()),
+         "Young capacity (" SIZE_FORMAT ") must exceed used (" SIZE_FORMAT ") plus humongous waste (" SIZE_FORMAT ")",
+         young_capacity, young_generation->used(), young_generation->get_humongous_waste());
 
   size_t young_available = young_capacity - (young_generation->used() + young_generation->get_humongous_waste());
   young_available += young_cset_regions * region_size_bytes;
