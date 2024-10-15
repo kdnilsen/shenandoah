@@ -509,7 +509,6 @@ private:
   ShenandoahVerifier*        _verifier;
 
   ShenandoahPhaseTimings*       _phase_timings;
-  ShenandoahEvacuationTracker*  _evac_tracker;
   ShenandoahMmuTracker          _mmu_tracker;
 
 public:
@@ -533,10 +532,9 @@ public:
   ShenandoahFreeSet*         free_set()          const { return _free_set;          }
   ShenandoahPacer*           pacer()             const { return _pacer;             }
 
-  ShenandoahPhaseTimings*      phase_timings()   const { return _phase_timings;     }
-  ShenandoahEvacuationTracker* evac_tracker()    const { return _evac_tracker;      }
+  ShenandoahPhaseTimings*    phase_timings()     const { return _phase_timings;     }
 
-  ShenandoahEvacOOMHandler* oom_evac_handler() { return &_oom_evac_handler; }
+  ShenandoahEvacOOMHandler*  oom_evac_handler()        { return &_oom_evac_handler; }
 
   void on_cycle_start(GCCause::Cause cause, ShenandoahGeneration* generation);
   void on_cycle_end(ShenandoahGeneration* generation);
